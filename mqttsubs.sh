@@ -316,6 +316,23 @@ case $1 in
 esac
 }
 
+function os_actions () { ###################################################
+#act :: payload
+#<hostname>/oscmd/<cmd> <args> >> ../oscmd/json "<json>" 
+return 0
+[[ ${#@} -ne 2 ]] && return 0 
+case $1 in
+'demo') cmd="demo $2"; sr="result of pseudo just for demo";;
+'systemctl') return 0 
+  cmd="systemctl $2" #eg.: ../os/systemctl <stop service>
+  sr=$(eval $cmd) || return 1
+;;
+*) return 0
+esac
+json="{\"exec\":{\"cmd\":\"$1\",\"args\":\"$2\",\"res\":\"OK\",\"ret\":\"$sr\"}}"
+mqtt_cmd/oscmd/json -m "$json"
+}
+
 ################################################################################
 ##### error/debug functions ####################################################
 ################################################################################
@@ -379,6 +396,7 @@ PID=$(cat $run_path/mqtt.pid) || { echo "[FAIL] $subscriber did not start!"; exi
   'camera') camera_actions $id $act $sbj $val;;
   'motion') motion_actions $id $act $sbj $val;;
   'daemon') daemon_actions $act $sbj $val;;
+  'oscmd') os_actions $act $val;;
   *) [[ $debug -eq 1 ]] && { echo "[debug] received $msg";echo "[debug] [loop]'$cat' has no case in \$cat."; }
   esac
 #...end interpret/filter/actions
