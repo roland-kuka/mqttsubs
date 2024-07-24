@@ -24,28 +24,27 @@ OVERVIEW OF CLI OPTIONS
 *  stop                     >>   $0 stop daemon
 * restart                  >>   $0 restart daemon
 * status .                 >>   $0 status daemon
-..camera_ptz . . .         >>   $0 camera_ptz <id> <act> <val>
-..on_motion_detected .     >>   motion event: $0 on_motion_detected %t
-..on_camera_found .        >>   motion event: $0 on_camera_found %t
-..on_camera_lost .         >>   motion event: $0 on_camera_lost %t
+* camera_ptz . . .         >>   $0 camera_ptz <id> <act> <val>
+* on_motion_detected .     >>   motion event: $0 on_motion_detected %t
+* on_camera_found .        >>   motion event: $0 on_camera_found %t
+* on_camera_lost .         >>   motion event: $0 on_camera_lost %t
 
 OVERVIEW OF MQTT TOPICS:
-$(hostname)/ 
-./camera
-../control/<id>/[up|stop|down|left|right|center|vpatrol|hpatrol|setpreset|callpreset|ir|led]
+*$(hostname)/ 
+*./camera
+*../control/<id>/[up|stop|down|left|right|center|vpatrol|hpatrol|setpreset|callpreset|ir|led]
 
-./motion/<id>/ 
-../detection [ON|0|OFF|1] >> ../state [ON|0|OFF|1]
-../snapshot [ON|1]        >> ../state [OFF]
-../getcf <key>            >> ../<id>/key/state <value> #get config value
-../getrt <key>            >> ../<id>/key/state <value> #get runtime value
-../set/key <value>        >> ../<id>/key/state <value> #set config value
+*./motion/<id>/ 
+*../detection [ON|0|OFF|1] >> ../state [ON|0|OFF|1]
+*../snapshot [ON|1]        >> ../state [OFF]
+*../getcf <key>            >> ../<id>/key/state <value> #get config value
+*../getrt <key>            >> ../<id>/key/state <value> #get runtime value
+*../set/key <value>        >> ../<id>/key/state <value> #set config value
 
-./daemon/
-../getcf <key>            >> ../<id>/key/state <value> #get config value
-../getrt <key>            >> ../<id>/key/state <value> #get runtime variable
-../set/key <value>        >> ../<id>/key/state <value> #set config value
-
+*./daemon/
+*../getcf <key>            >> ../<id>/key/state <value> #get config value
+*../getrt <key>            >> ../<id>/key/state <value> #get runtime variable
+*../set/key <value>        >> ../<id>/key/state <value> #set config value
 
 SETUP:
 1. Build a motioneyeOS with the 'mosquitto' module.
