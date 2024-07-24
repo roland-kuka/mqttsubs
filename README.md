@@ -19,11 +19,11 @@ MAIN FILES: 'mqttsubs.sh'.sh 'mqttsubs.conf'
 CONF SAMPLES: motion.conf camera-1.conf
 
 OVERVIEW OF CLI OPTIONS
--install                  >>   $0 install -c /etc/mqttsubs
-..start                    >>   $0 start daemon
-..stop                     >>   $0 stop daemon
-..restart                  >>   $0 restart daemon
-..status .                 >>   $0 status daemon
+* install                  >>   $0 install -c /etc/mqttsubs
+*  start                   >>   $0 start daemon
+*  stop                     >>   $0 stop daemon
+* restart                  >>   $0 restart daemon
+* status .                 >>   $0 status daemon
 ..camera_ptz . . .         >>   $0 camera_ptz <id> <act> <val>
 ..on_motion_detected .     >>   motion event: $0 on_motion_detected %t
 ..on_camera_found .        >>   motion event: $0 on_camera_found %t
