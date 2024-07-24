@@ -3,8 +3,14 @@ Provide a generic mqtt subscriber/listener for linux-os/motion/motioneye.
 
 SYNOPSIS:
 'mqttsubs.sh' is a pure bash script to enable control of os, motion and motioneye
-using the mqtt protocol. It uses mosquitto_pub and mosquitto_sub.
-For motioneyeOS special build the 'mosquitto-clients' module is required.
+using the mqtt protocol. It uses mosquitto-clients package to subscribe- and 
+publish to '$topic/#'.
+'mqttsubs.sh' has buildin support for motion/motioneyeos camera. This allows
+for control and data/status query of remote network cameras.
+'mqttsubs.sh' can serve as a platform to develop mqtt based interfaces to under-
+-lying OS, though this poses a security risk and must be used with utmost care.
+
+For motioneyeOS special build with the 'mosquitto-clients' module is required.
 
 REMARKS:
 'mqttsubs.sh' should be used only on the machine running motion/motioneye and this
@@ -30,21 +36,22 @@ OVERVIEW OF CLI OPTIONS
 * on_camera_lost .         >>   motion event: $0 on_camera_lost %t
 
 OVERVIEW OF MQTT TOPICS:
-*$(hostname)/ 
-*./camera
-*../control/<id>/[up|stop|down|left|right|center|vpatrol|hpatrol|setpreset|callpreset|ir|led]
-
-*./motion/<id>/ 
-*../detection [ON|0|OFF|1] >> ../state [ON|0|OFF|1]
-*../snapshot [ON|1]        >> ../state [OFF]
-*../getcf <key>            >> ../<id>/key/state <value> #get config value
-*../getrt <key>            >> ../<id>/key/state <value> #get runtime value
-*../set/key <value>        >> ../<id>/key/state <value> #set config value
-
-*./daemon/
-*../getcf <key>            >> ../<id>/key/state <value> #get config value
-*../getrt <key>            >> ../<id>/key/state <value> #get runtime variable
-*../set/key <value>        >> ../<id>/key/state <value> #set config value
+* $(hostname)/
+  
+* ./camera
+* ../control/<id>/[up|stop|down|left|right|center|vpatrol|hpatrol|setpreset|callpreset|ir|led]
+  
+* ./motion/<id>/
+* ../detection [ON|0|OFF|1] >> ../state [ON|0|OFF|1]
+* ../snapshot [ON|1]        >> ../state [OFF]
+* ../getcf <key>            >> ../<id>/key/state <value> #get config value
+* ../getrt <key>            >> ../<id>/key/state <value> #get runtime value
+* ../set/key <value>        >> ../<id>/key/state <value> #set config value
+  
+* ./daemon/
+* ../getcf <key>            >> ../<id>/key/state <value> #get config value
+* ../getrt <key>            >> ../<id>/key/state <value> #get runtime variable
+* ../set/key <value>        >> ../<id>/key/state <value> #set config value
 
 SETUP:
 1. Build a motioneyeOS with the 'mosquitto' module.
