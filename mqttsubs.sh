@@ -123,7 +123,7 @@ function on_camera_lost(){ #####################################################
 #actions to perform on mqtt bus when motion is detected by a camara
 local s; unset s
 id=${$1:=0} #must have camera id
-  $mqtt_cmd/camera/$id/conected -m "1";
+  $mqtt_cmd/camera/$id/connected -m "1";
   [[ -z $EventBusTopic ]] && return 0
   s="$(hostname)::Camera-$id::lost"
   ${mqtt_cmd%' -t'*} -t $EventBusTopic -m $s
@@ -384,14 +384,14 @@ PID=$(cat $run_path/mqtt.pid) || { echo "[FAIL] $subscriber did not start!"; exi
 #...end interpret/filter/actions
 #  [[ -n $flag_exit ]] && break #stop or restart
   done #exit message read daemon loop; this happens when mosquitto_sub pid is killed!
-  $mqtt_cmd/$service/LWT -m "$lwt_disconnect"
+  [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_disconnect:"offline"}"
   echo "[OK] $service stopped."
 #  [[ -n $flag_exit ]] && ($0 $flag_exit) #restart daemon from mqtt
 ) & echo $! >"$run_path/read.pid" #subshell daemon end
 
 ### started mqtt message daemon ####################
-$mqtt_cmd/$service/LWT -m "$lwt_connect"
-echo "[OK] Started $service [$(cat $run_path/mqtt.pid)]"
+  [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_connect:="online"}"
+  echo "[OK] Started $service [$(cat $run_path/mqtt.pid)]"
 }
 
 function stop() { ##############################################################
@@ -473,17 +473,13 @@ subscriber="${subscriber:="/usr/bin/mosquitto_sub"}"
 publisher="${publisher:="/usr/bin/mosquitto_pub"}"
 broker=${broker:="127.0.0.1:1883"}
 topic="${topic:=$(hostname)}"
-lwt_topic="${lwt_topic:="cameras/LWT"}"
+lwt_topic="${lwt_topic:="/LWT"}"
 lwt_connect="${lwt_connect:="online"}"
 lwt_disconnect="${lwt_disconnect:="offline"}"
 
 #defaults motion
 motion_conf=${motion_conf:="/etc/motioneye/motion.conf"}
 motion=${motion:="127.0.0.1:7999"}
-
-#defaults messages
-DeadTime=${DeadTime:=5}
-Priority=${Priority:=0}
 
 #message bus
 AlertBusTopic="ohab/security/AlertBus"
