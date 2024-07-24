@@ -53,6 +53,9 @@ OVERVIEW OF MQTT TOPICS:
 * ../getrt key              >> ../id/key/state <value> #get runtime variable
 * ../set/key value          >> ../id/key/state <value> #set config value
 
+*  ./oscmd/
+* ../command args           >> ../oscmd/json           #{exec:{cmd:?,args:?,res:OK,ret:?}}
+
 SETUP:
 1. Build a motioneyeOS with the 'mosquitto' module.
 2. Startup the camera. Wait for it to boot. Enable ssh and then ssh to camera.
