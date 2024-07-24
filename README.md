@@ -19,7 +19,7 @@ MAIN FILES: 'mqttsubs.sh'.sh 'mqttsubs.conf'
 CONF SAMPLES: motion.conf camera-1.conf
 
 OVERVIEW OF CLI OPTIONS
---install                  >>   $0 install -c /etc/mqttsubs
+-install                  >>   $0 install -c /etc/mqttsubs
 ..start                    >>   $0 start daemon
 ..stop                     >>   $0 stop daemon
 ..restart                  >>   $0 restart daemon
