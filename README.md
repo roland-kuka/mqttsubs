@@ -26,8 +26,8 @@ CONF SAMPLES: motion.conf camera-1.conf
 
 OVERVIEW OF CLI OPTIONS
 * install                  >>   $0 install -c /etc/mqttsubs
-*  start                   >>   $0 start daemon
-*  stop                     >>   $0 stop daemon
+* start                   >>   $0 start daemon
+* stop                    >>   $0 stop daemon
 * restart                  >>   $0 restart daemon
 * status .                 >>   $0 status daemon
 * camera_ptz . . .         >>   $0 camera_ptz <id> <act> <val>
@@ -38,10 +38,10 @@ OVERVIEW OF CLI OPTIONS
 OVERVIEW OF MQTT TOPICS:
 * $(hostname)/
   
-* ./camera
-* ../control/<id>/[up|stop|down|left|right|center|vpatrol|hpatrol|setpreset|callpreset|ir|led]
+* ./camera/id/
+* ../control/[up|stop|down|left|right|center|vpatrol|hpatrol|setpreset|callpreset|ir|led]
   
-* ./motion/<id>/
+* ./motion/id/
 * ../detection [ON|0|OFF|1] >> ../state [ON|0|OFF|1]
 * ../snapshot [ON|1]        >> ../state [OFF]
 * ../getcf key              >> ../id/key/state <value> #get config value
