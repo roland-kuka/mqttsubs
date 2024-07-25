@@ -4,7 +4,7 @@
 # Packages: motion, mosquitto-clients, [motioneye]
 # Version: v1.0 
 # Author: Roland Ebener
-# Date: 2024/24/07
+# Date: 2024/25/07
 ################################################################################
 
 # This config is used by 'mqttsub.sh' You must restart mqttsub.service for 
@@ -307,7 +307,7 @@ case $1 in
     case $4 in
       "ssid"|"wifi") sr=$(iwgetid);sr="${sr#*'ESSID:'}";;
       "status") sr=$(status --json);;
-    *) sr="${!4}"
+    *) [[ "$4" =~ ^[a-zA-Z][a-zA-Z0-9_]*$ ]] && sr="${!4}" || return 1
     esac
     [[ -z $sr ]] && sr="#ERR#"
     $mqtt_cmd/daemon/run/$4/state -m "$sr"
@@ -315,15 +315,15 @@ case $1 in
 ;;
 'set')
   case $2 in
-  'cf') #sbj=key; payload=<new value>
+  'cf') #key2=<config key>; payload=<new value>
     cmd="setconfig \"$3\" \"$4\" \"$conf_file\" \"=\"" 
     [[ $debug -eq 2 ]] && { echo "[debug] [daemon] [$1/$2] command: '$cmd'"; return 0; }
     eval $cmd || return 1 #execute
     $mqtt_cmd/daemon/config/$3/state -m "$4"
     #TODO: deamon reload
   ;;
-  'rt') #sbj=<runtime var>; payload=<new value>
-    cmd="$3=$4"
+  'rt') #key2=<runtime var>; payload=<new value>
+    [[ "$3" =~ ^[a-zA-Z][a-zA-Z0-9_]*$ ]] && cmd="$3=$4" || return 1
     [[ $debug -ne 2 ]] && { echo "[debug] [daemon] [$1/$2] Command: '$cmd'"; return 0; }
     eval $cmd 2>/dev/null || return 1 #exec
     $mqtt_cmd/daemon/run/$3/state -m "${!3}"; return 0
@@ -337,18 +337,14 @@ function os_actions () { ###################################################
 #act :: payload
 #<hostname>/oscmd/<cmd> <args> >> ../oscmd/json "<json>" 
 [[ $debug -ne 0 ]] && trap "error_handler" ERR
-return 0
 [[ ${#@} -ne 2 ]] && return 0 
 case $1 in
 'demo') cmd="demo $2"; sr="result of pseudo just for demo";;
-'systemctl') return 0 
-  cmd="systemctl $2" #eg.: ../os/systemctl <stop service>
-  sr=$(eval $cmd) || return 1
-;;
+'ls') return 0; cmd="ls $2"; sr="$(echo $(eval "$cmd"))";;
 *) return 0
 esac
-json="{\"exec\":{\"cmd\":\"$1\",\"args\":\"$2\",\"res\":\"OK\",\"ret\":\"$sr\"}}"
-mqtt_cmd/oscmd/json -m "$json"
+json="{\"$topic\":{\"exec\":{\"cmd\":\"$1\",\"args\":\"$2\",\"res\":\""$sr"\"}}}"
+$mqtt_cmd/oscmd/json -m "$json"
 }
 
 ################################################################################
@@ -368,7 +364,7 @@ local pid files f
 #send LWT offline message to mqtt4
   [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_disconnect:="offline"}"  
 #delete files we created in $run_path
-  files="mqtt.pid read-pid fifo heartbeat.pid watchdog.pid" #list of files to delete in $run_path
+  files="mqtt.pid read.pid fifo heartbeat.pid watchdog.pid" #list of files to delete in $run_path
   for f in $files;do rm $run_path/$f 2>/dev/null; done
 #finally get mosquitto_sub pid we started and terminate
   pid=$(ps -eaf | grep "$subscriber.*$topic" | grep -v "pts" | head -1 | awk '{print $2}') #mosquitto pid
@@ -416,17 +412,17 @@ PID=$(cat $run_path/mqtt.pid 2>/dev/null) || { echo "[FAIL] $subscriber did not 
   [[ $id == ?(-)+([0-9]) ]] && id="/$id" || unset id          #check if id is valid, else unset!
   tmp=${tmp/"$id/"/"/"}                                       #remove id
   cat="${tmp%%'/'*}";tmp=${tmp/"$cat/"/}                      #get cat=category [camera|motion|daemon|os]
-  act="${tmp%%'/'*}";tmp=${tmp/"$act/"}                       #get act=action [get|set|detection|snapshot|control...]
+  act="${tmp%%'/'*}";tmp=${tmp/"$act/"}                       #get act=action [get|set|detection|snapshot|control|<cmd>...]
   key1="${tmp%%'/'*}";tmp=${tmp/"$key1/"}                     #key1 [rt|cf|..|<var>]
   key2="${tmp##*'/'}"                                         #key2 [<var>]
   val=${msg#*' '}                                             #get payload >> val
 #...start interpret/filter/actions here
   [[ $debug -ne 0 ]] && { echo "[debug] [received] $msg"; echo "[debug] [cat|id|act|sbj val] $cat|$id|$act|$sbj $val"; }
   case $cat in
-  'camera') camera_actions $id $act $key1 $val;;
-  'motion') motion_actions $id $act $key1 $val;;
-  'daemon') daemon_actions $act $key1 $key2 $val;;
-  'oscmd') os_actions $act $val;;
+  'camera') camera_actions $id $act $key1 "$val";;
+  'motion') motion_actions $id $act $key1 "$val";;
+  'daemon') daemon_actions $act $key1 $key2 "$val";;
+  'oscmd') os_actions $act "$val";;
   *) [[ $debug -eq 1 ]] && { echo "[debug] received $msg";echo "[debug] [loop]'$cat' has no case in \$cat."; }
   esac
 #...end interpret/filter/actions
@@ -521,7 +517,7 @@ subscriber="${subscriber:="/usr/bin/mosquitto_sub"}"
 publisher="${publisher:="/usr/bin/mosquitto_pub"}"
 broker=${broker:="127.0.0.1:1883"}
 topic="${topic:=$(hostname)}"
-lwt_topic="${lwt_topic:="/LWT"}"
+lwt_topic="${lwt_topic:="LWT"}"
 lwt_connect="${lwt_connect:="online"}"
 lwt_disconnect="${lwt_disconnect:="offline"}"
 
