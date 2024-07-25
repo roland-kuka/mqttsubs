@@ -4,7 +4,7 @@
 # Packages: motion, mosquitto-clients, [motioneye]
 # Version: v1.0 
 # Author: Roland Ebener
-# Date: 2024/25/07
+# Date: 2024/24/07
 ################################################################################
 
 # This config is used by 'mqttsub.sh' You must restart mqttsub.service for 
@@ -548,8 +548,8 @@ case $1 in
 'stop') stop;;
 'restart') stop;sleep 2;start;;
 'status') status "$2";;
-'debug_on') $mqtt_cmd/daemon/set -m "debug=1";;
-'debug_off') $mqtt_cmd/daemon/set -m "debug=0";;  
+'debug_on') $mqtt_cmd/daemon/set/rt/debug -m "1";;
+'debug_off') $mqtt_cmd/daemon/set/rt/debug -m "0";;  
 'camera_ptz') camera_action "$1" "control" "$2" "$3";;
 'on_motion_detected') on_motion_detected "$2";;
 'on_camera_lost') on_camera_lost "$2";;
