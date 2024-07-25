@@ -36,9 +36,9 @@ local s d
   [[ -z $1 || -z $2 || -z $3 ]] && return 1 
   [[ ! -f $3 ]] && return 1 || d=${4:=' '}
 #key=value already exits, replace line
-  [[ -n $(grep "^[^#]\?\s*$1$d.*" "$3" 2>/dev/null) ]] && s="$1$d"                      # 'key=value'
-  [[ ${1:0:1} =~ '&' && -n $(grep "^#\?\s*$1$d.*" "$3" 2>/dev/null) ]] && s="# $1$d"   # '# &key=value' 
-  [[ -n $s ]] && { sed -i "/^$s[0-9]*/c $s$2" "$3"; return 0; }                        # inline sed replace line
+  [[ -n $(grep "^[^#]\?\s*$1$d.*" "$3") ]] && s="$1$d"                      # 'key=value'
+  [[ ${1:0:1} =~ '&' && -n $(grep "^#\?\s*$1$d.*" "$3") ]] && s="# $1$d"    # '# &key=value' 
+  [[ -n $s ]] && { sed -i "/^$s[0-9]*/c $s$2" "$3"; return 0; }             # inline sed replace line
 
 #key=value does not exist, add it
   s=$1$d$2;s=${s/'&'/'# &'}
@@ -56,8 +56,8 @@ function getconfig() { #########################################################
   local s d 
   [[ -z $1 || -z $2 ]] && return 1
   [[ ! -f $2 ]] && return 1 || d=${3:=' '}
-  s=$(grep "^[^#]\?\s*$1$d.*" "$2" 2>/dev/null)
-  [[ ${1:0:1} =~ '&' ]] && s=$(grep "^#\?\s*"$1$d".*" "$2" 2>/dev/null)
+  s=$(grep "^[^#]\?\s*$1$d.*" "$2")
+  [[ ${1:0:1} =~ '&' ]] && { s=$(grep "^#\?\s*$1$d.*" "$2");s=${s/'# &'/}; }
   s=${s#*$d};s=${s%%' '*}; #s=${s%' #'*}
   [[ -z $s ]] && return 1 || echo $s
   return 0
@@ -78,9 +78,8 @@ local s sr ary=("on_motion_detected" "on_camera_found" "on_camera_lost" )
   for evt in ${ary[@]};do
     s=$(jq -rn --arg x "$(realpath $0) $evt %t" '$x|@uri')
     cmd="$http_cmd/0/config/set?$evt=$s"
-    [[ $debug -eq 1 ]] \
-      && { echo "[debug] [set_motion_events] command: '$cmd'"; } \
-      || { sr=$($cmd) || return 1; echo "[$(date '+%Y/%m/%d %T')] [event] Motion parameter: $evt set."; }
+    [[ $debug -eq 99 ]] && { echo "[debug] [set_motion_events] command: $cmd."; }
+    sr=$($cmd) || return 1
   done
 #apply/write to motion config to make permanent
 #  sr=$($http_cmd/0/config/write)
@@ -212,7 +211,7 @@ case $2 in
   *) return 1
   esac
   [[ $debug -eq 1 ]] && { echo "[debug] [motion] [$2] command: '$cmd'"; return 0; }
-  [[ -n $cmd ]] && sr=$($cmd)  
+  [[ -n $cmd ]] && $cmd 
   $mqtt_cmd/motion""$1/$2/state -m ${$4^^} 
 ;;
 'snapshot') #payload=command
@@ -228,7 +227,7 @@ case $2 in
   [[ "${1:1}" -gt 0 ]] && cfgf="camera-${1:1}.conf" || cfgf="motion.conf"
   cmd="getconfig \"$4\" $(dirname $motion_conf)/$cfgf ' '"
   [[ $debug -eq 1 ]] && { echo "[debug] [motion] [$2] [$4] command: '$cmd'"; }
-  sr=$(eval $cmd) || return 1 #execute
+  sr=$($cmd) || return 1 #execute
   [[ -n $sr ]] && $mqtt_cmd/motion""$1/config/$4/state -m $sr
 ;;
 'getrt') #payload=key
@@ -250,11 +249,11 @@ case $2 in
 ;;
 'set') #sbj=key payload=<new value>
 #key must be included in file 'whitelist' in path of $conf_file
-  cat $(dirname $conf_file)/whitelist 2>/dev/null | grep "$3" 2>/dev/null \
-    || { $mqtt_cmd/motion""$1/config/$3/state -m "#blocked#"; return 1; }
+  sr=$(cat $(dirname $conf_file)/whitelist 2>/dev/null | grep "$3")
+  [[ -z $sr ]] && { $mqtt_cmd/motion""$1/config/$3/state -m "#blocked#"; return 1; }
   [[ "${1:1} " -gt 0 ]] && cfgf="camera-${1:1}.conf" || cfgf="motion.conf"
   cmd="setconfig \"$3\" \"$4\" \"$(dirname $motion_conf)/$cfgf\" ' '"
-  [[ $debug -eq 1 ]] && { echo "[debug] [motion] [$2] [$3] command: '$cmd'" && return 0; } 
+  [[ $debug -eq 1 ]] && { echo "[debug] [motion] [$2] [$3] command: '$cmd'"; return 0; } 
   eval $cmd || return 1 #execute
 #  if [[ ! ${3:0:1} =~ '&' ]]; then #only if 'key=' default motion config
 #    mpid=$(ps -eaf | grep "/$motion_conf" | grep -v "pts" | awk '{print $2}')
@@ -349,6 +348,14 @@ function debug_msg () { ########################################################
 echo "[debug] [debug_msg]: ${#@}" :: $1 :: $2 :: $3 :: $4 :: $5
 }
 
+function trap_exit () {
+  exec 1>&3 2>&4
+  PID=$(cat $run_path/mqtt.pid 2>/dev/null)
+  kill -s 9 $PID 2>/dev/null; rm $run_path/mqtt.pid
+  [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_disconnect:="offline"}"
+}
+
+
 ################################################################################
 ##### start/stop functions #####################################################
 ################################################################################
@@ -375,10 +382,10 @@ fifo="$run_path/fifo"
 PID=$(cat $run_path/mqtt.pid) || { echo "[FAIL] $subscriber did not start!"; exit 1; }
 
 ### begin mqtt message read daemon loop ####################
-( exec 1>> $run_path/debug.log 2>>$log_path/error.log
+( exec 3>&1 4>&2;exec 1>> $run_path/debug.log 2>>$log_path/error.log
   trap "[[ -f $conf_file ]] && source $conf_file" SIGHUP
   [[ $debug -eq 1 ]] && trap "error_handler" ERR
-  trap "kill -s 9 $PID;rm $run_path/mqtt.pid" EXIT
+  trap "trap_exit" EXIT SIGKILL
   while read msg <$fifo; do
 #...split mqtt message; $topic/cat/id/act/sbj <payload>
   unset id cat act sbj val
@@ -404,8 +411,6 @@ PID=$(cat $run_path/mqtt.pid) || { echo "[FAIL] $subscriber did not start!"; exi
 #...end interpret/filter/actions
 #  [[ -n $flag_exit ]] && break #stop or restart
   done #exit message read daemon loop; this happens when mosquitto_sub pid is killed!
-  [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_disconnect:"offline"}"
-  echo "[OK] $service stopped."
 #  [[ -n $flag_exit ]] && ($0 $flag_exit) #restart daemon from mqtt
 ) & echo $! >"$run_path/read.pid" #subshell daemon end
 
