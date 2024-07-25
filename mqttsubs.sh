@@ -4,7 +4,7 @@
 # Packages: motion, mosquitto-clients, [motioneye]
 # Version: v1.0 
 # Author: Roland Ebener
-# Date: 2024/22/07
+# Date: 2024/24/07
 ################################################################################
 
 # This config is used by 'mqttsub.sh' You must restart mqttsub.service for 
@@ -36,8 +36,8 @@ local s d
   [[ -z $1 || -z $2 || -z $3 ]] && return 1 
   [[ ! -f $3 ]] && return 1 || d=${4:=' '}
 #key=value already exits, replace line
-  [[ -n $(grep "^[^#]\?\s*$1$d.*" "$3" 2>dev/null) ]] && s="$1$d"                      # 'key=value'
-  [[ ${1:0:1} =~ '&' && -n $(grep "^#\?\s*$1$d.*" "$3" 2>dev/null) ]] && s="# $1$d"    # '# &key=value' 
+  [[ -n $(grep "^[^#]\?\s*$1$d.*" "$3" 2>/dev/null) ]] && s="$1$d"                      # 'key=value'
+  [[ ${1:0:1} =~ '&' && -n $(grep "^#\?\s*$1$d.*" "$3" 2>/dev/null) ]] && s="# $1$d"   # '# &key=value' 
   [[ -n $s ]] && { sed -i "/^$s[0-9]*/c $s$2" "$3"; return 0; }                        # inline sed replace line
 
 #key=value does not exist, add it
@@ -56,7 +56,7 @@ function getconfig() { #########################################################
   local s d 
   [[ -z $1 || -z $2 ]] && return 1
   [[ ! -f $2 ]] && return 1 || d=${3:=' '}
-  s=$(grep "^[^#]\?\s*$1$d.*" "$2" 2>dev/null)
+  s=$(grep "^[^#]\?\s*$1$d.*" "$2" 2>/dev/null)
   [[ ${1:0:1} =~ '&' ]] && s=$(grep "^#\?\s*"$1$d".*" "$2" 2>/dev/null)
   s=${s#*$d};s=${s%%' '*}; #s=${s%' #'*}
   [[ -z $s ]] && return 1 || echo $s
@@ -141,7 +141,7 @@ function run_camapi () { #######################################################
 local conf api ip ptzcmd cmd cmd1 cmd val sr
 
 #get api, ip:port from config
-conf="$(dirname $motion_conf 2>dev/null)/camera-${1:1}"
+conf="$(dirname $motion_conf 2>/dev/null)/camera-${1:1}"
 api=$(getconfig "&cam_api" "$conf" " ") || return 1
 ip=$(getconfig "netcam-url" "$conf" " ") || return 1
 [[ $debug -eq 1 ]] && echo "[debug] [getptz_cmd] api=$api@$ip :: $2 :: $3."
@@ -199,7 +199,8 @@ function motion_actions () { ###################################################
 #/id :: act :: sbj :: payload
 #<hostname>/motion/<id>/detection ON|OFF >> ../<id>/detection/state ON|OFF 
 #<hostname>/motion/<id>/snapshot ON >> ../<id>/snapshot/state OFF
-#<hostname>/motion/<id>/get <key> >> ../<id>/config/<key>/state <value>
+#<hostname>/motion/<id>/getcf <key> >> ../<id>/config/<key>/state <value>
+#<hostname>/motion/<id>/getrt <key> >> ../<id>/run/<key>/state <value>
 #<hostname>/motion/<id>/set/<key> <value> >> ../<id>/config/<key>/state <value>
 [[ ${#@} -lt 4 ]] && return 0
 local sr cmd cfgf mpid; unset sr cmd cfgf mpid
@@ -255,12 +256,12 @@ case $2 in
   cmd="setconfig \"$3\" \"$4\" \"$(dirname $motion_conf)/$cfgf\" ' '"
   [[ $debug -eq 1 ]] && { echo "[debug] [motion] [$2] [$3] command: '$cmd'" && return 0; } 
   eval $cmd || return 1 #execute
-  if [[ ! ${3:0:1} =~ '&' ]]; then #only if 'key=' default motion config
-    mpid=$(ps -eaf | grep "/$motion_conf" | grep -v "pts" | awk '{print $2}')
-    [[ -n $mpid ]] || return 1
-    kill -s 1 $mpid || { $mqtt_cmd/motion""$1/config/$3/state -m "#ERR#}"; return 0; } 
-  fi
-  $mqtt_cmd/motion""$1/run/$3/state -m "$4"  
+#  if [[ ! ${3:0:1} =~ '&' ]]; then #only if 'key=' default motion config
+#    mpid=$(ps -eaf | grep "/$motion_conf" | grep -v "pts" | awk '{print $2}')
+#    [[ -n $mpid ]] || return 1
+#    kill -s 1 $mpid || { $mqtt_cmd/motion""$1/config/$3/state -m "#ERR#}"; return 0; } 
+#  fi
+  $mqtt_cmd/motion""$1/config/$3/state -m "$4"  
 ;;  
 *) [[ $debug -eq 1 ]] && echo "[debug] [motion] '$2' has no case in \$act."
 esac
@@ -269,9 +270,10 @@ esac
 function daemon_actions () { ###################################################
 #act :: sbj :: payload
 #<hostname>/daemon/control <stop|restart> >> ../daemon/run/<param> OK 
-#<hostname>/daemon/get <ssid|wifi|status|debug> >> ../daemon/run/<param>/state 
-#<hostname>/daemon/set/<key> <value> >> ../daemon/config/<key>/state <value> 
-#<hostname>/daemon/setrt/<key> <value> >> ../daemon/config/<key>/state <value> 
+#<hostname>/daemon/getcf <var> >> ../daemon/config/<param>/state  
+#<hostname>/daemon/getrt <ssid|wifi|status|debug> >> ../daemon/run/<param>/state
+#<hostname>/daemon/setcf/<key> <value> >> ../daemon/config/<key>/state <value> 
+#<hostname>/daemon/setrt/<key> <value> >> ../daemon/run/<key>/state <value> 
 local sr cmd; unset sr cmd
 [[ ${#@} -ne 3 ]] && return 0 
 case $1 in
@@ -299,7 +301,7 @@ case $1 in
   esac
   $mqtt_cmd/daemon/run/$3/state -m "${!3}"
 ;;
-'set') #sbj=key; payload=<new value>
+'setcf') #sbj=key; payload=<new value>
   cmd="setconfig \"$2\" \"$3\" \"$conf_file\" \"=\"" 
   [[ $debug -eq 1 ]] && { echo "[debug] [daemon] [$1] [$2] command: '$cmd'"; return 0; }
   eval $cmd || return 1 #execute
