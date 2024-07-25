@@ -12,7 +12,7 @@
 # by the user. See main section in this script more configurable option.
 
 #daemon config
-debug=1
+debug=1 #level 2: 1 no http_cmd, no set
 
 #mosquitto config
 # You need at least a broker ip address. The default topic is the host's name.
@@ -78,8 +78,8 @@ local s sr ary=("on_motion_detected" "on_camera_found" "on_camera_lost" )
   for evt in ${ary[@]};do
     s=$(jq -rn --arg x "$(realpath $0) $evt %t" '$x|@uri')
     cmd="$http_cmd/0/config/set?$evt=$s"
-    [[ $debug -eq 99 ]] && { echo "[debug] [set_motion_events] command: $cmd."; }
-    sr=$($cmd) || return 1
+    [[ $debug -eq 1 ]] && { echo "[debug] [set_motion_events] command: $cmd."; }
+    [[ $debug = 0 ]] && sr=$($cmd)
   done
 #apply/write to motion config to make permanent
 #  sr=$($http_cmd/0/config/write)
@@ -138,11 +138,10 @@ function run_camapi () { #######################################################
 # net camera. It will get its config from special '# &keys' in the camera-id.conf
 # You must configure '# &cam_api=' and there must be a 'netcam_url=' entry.
 local conf api ip ptzcmd cmd cmd1 cmd val sr
-
 #get api, ip:port from config
-conf="$(dirname $motion_conf 2>/dev/null)/camera-${1:1}"
+conf="$(dirname $motion_conf 2>/dev/null)/camera-${1:1}.conf"
 api=$(getconfig "&cam_api" "$conf" " ") || return 1
-ip=$(getconfig "netcam-url" "$conf" " ") || return 1
+ip=$(getconfig "netcam_url" "$conf" " ") || return 1
 [[ $debug -eq 1 ]] && echo "[debug] [getptz_cmd] api=$api@$ip :: $2 :: $3."
 
 case $api in 
@@ -164,7 +163,7 @@ case $api in
   "led") cmd="$cmd2""led_mode=$([[ $val -gt 0 ]] && echo 1 || echo 2;)"
   esac
   [[ ${cmd: -1} =~ '=' ]] && return 1 #no valid command
-  cmd="${ptz_cmd/'<cmd>'/"$cmd"}" 
+  cmd="curl \"${ptzcmd/'<cmd>'/"$cmd"}\"" 
   [[ $debug -eq 1 ]] && { echo "[debug] [camera] [$1] [$2] command: '$cmd'"; return 0; }
   sr=$(eval $cmd); [[ ${sr#'='*} =~ "\"ok\"" ]] && return 0 || return 1
 ;;
@@ -210,7 +209,7 @@ case $2 in
   "OFF"|0 ) cmd="$http_cmd""$1/detection/pause";;
   *) return 1
   esac
-  [[ $debug -eq 1 ]] && { echo "[debug] [motion] [$2] command: '$cmd'"; return 0; }
+  [[ $debug -ne 0 ]] && { echo "[debug] [motion] [$2] command: '$cmd'"; return 0; }
   [[ -n $cmd ]] && $cmd 
   $mqtt_cmd/motion""$1/$2/state -m ${$4^^} 
 ;;
@@ -219,29 +218,29 @@ case $2 in
   "ON"|1) cmd="$http_cmd""$1/action/snapshot";;
   *) : #do nothing
   esac 
-  [[ $debug -eq 1 ]] && { echo "[debug] [motion] [$2] command: '$cmd'"; return 0; }
+  [[ $debug -ne 0 ]] && { echo "[debug] [motion] [$2] command: '$cmd'"; return 0; }
   [[ -n $cmd ]] && $cmd
   $mqtt_cmd/motion""$1/$2/state -m "OFF" #always send OFF to reset
 ;; 
 'getcf') #payload=key
   [[ "${1:1}" -gt 0 ]] && cfgf="camera-${1:1}.conf" || cfgf="motion.conf"
   cmd="getconfig \"$4\" $(dirname $motion_conf)/$cfgf ' '"
-  [[ $debug -eq 1 ]] && { echo "[debug] [motion] [$2] [$4] command: '$cmd'"; }
-  sr=$($cmd) || return 1 #execute
+  [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2] [$4] command: '$cmd'";return 0; }
+  sr=$(eval $cmd) || return 1 #execute
   [[ -n $sr ]] && $mqtt_cmd/motion""$1/config/$4/state -m $sr
 ;;
 'getrt') #payload=key
   case $4 in #payload
   'detection') 
     cmd="$http_cmd""$1/detection/status";
-    [[ $debug -eq 1 ]] && { echo "[debug] [motion] [$2] command: '$cmd'"; return 0; }
+    [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2] command: '$cmd'"; return 0; }
     sr=$($cmd) || return 1 #execute
     case $(echo ${sr#*'status'} | tr -d '[:blank:]') in
       'ACTIVE') sr="ON";;'PAUSE') sr="OFF"
     esac;;
   *)
     cmd="$http_cmd""$1/config/get?query=$4"
-    [[ $debug -eq 1 ]] && { echo "[debug] [motion] [$2] [$4] command: '$cmd'"; return 0; }
+    [[ $debug -ne 0 ]] && { echo "[debug] [motion] [$2] [$4] command: '$cmd'"; return 0; }
     sr=$($cmd | grep -i "$4") || return 1 #execute
     [[ ! -z $sr && $? -eq 0 ]] && { sr=${sr#*'='};sr=${sr%'Done'*};sr=$(echo $sr | tr -d '[:blank:]'); }   
   esac
@@ -253,7 +252,7 @@ case $2 in
   [[ -z $sr ]] && { $mqtt_cmd/motion""$1/config/$3/state -m "#blocked#"; return 1; }
   [[ "${1:1} " -gt 0 ]] && cfgf="camera-${1:1}.conf" || cfgf="motion.conf"
   cmd="setconfig \"$3\" \"$4\" \"$(dirname $motion_conf)/$cfgf\" ' '"
-  [[ $debug -eq 1 ]] && { echo "[debug] [motion] [$2] [$3] command: '$cmd'"; return 0; } 
+  [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2] [$3] command: '$cmd'"; return 0; } 
   eval $cmd || return 1 #execute
 #  if [[ ! ${3:0:1} =~ '&' ]]; then #only if 'key=' default motion config
 #    mpid=$(ps -eaf | grep "/$motion_conf" | grep -v "pts" | awk '{print $2}')
@@ -262,7 +261,7 @@ case $2 in
 #  fi
   $mqtt_cmd/motion""$1/config/$3/state -m "$4"  
 ;;  
-*) [[ $debug -eq 1 ]] && echo "[debug] [motion] '$2' has no case in \$act."
+*) [[ $debug -ne 0 ]] && echo "[debug] [motion] '$2' has no case in \$act."
 esac
 }
 
@@ -282,38 +281,39 @@ case $1 in
     "restart") flag_exit="restart";;
     "reload") kill -s SIGHUP $(cat $run_path/read.pid)
   esac
-  [[ $debug -eq 1 ]] && { echo "[debug] [daemon] [$1] command: '$cmd'" && return 0; }
+  [[ $debug -ne 0 ]] && { echo "[debug] [daemon] [$1] command: '$cmd'" && return 0; }
   $cmd || return 1
   $mqtt_cmd/daemon/control/$3 -m "EXECUTED"
 ;;
 'getcf') #payload=key
   cmd="getconfig \"$3\" \"$conf_file\" \"=\""
-  [[ $debug -eq 1 ]] && { echo "[debug] [daemon] [$1] command: $cmd"; return 0; }
+  [[ $debug -ne 2 ]] && { echo "[debug] [daemon] [$1] command: $cmd"; return 0; }
   sr=$(eval $cmd) || return 1 #execute
   $mqtt_cmd/daemon/config/$3/state -m "${sr:=null}"
 ;;
 'getrt') #payload=<runtime var>
   case $3 in
     "ssid"|"wifi") sr=$(iwgetid);sr="${sr#*'ESSID:'}";;
-    "status") sr=$(status json);;
-  *) sr="${!3}"; [[ -z sr ]] && return 1
+    "status") sr=$(status --json);;
+  *) sr="${!3}"
   esac
-  $mqtt_cmd/daemon/run/$3/state -m "${!3}"
+  [[ -z $sr ]] && sr="#ERR#"
+  $mqtt_cmd/daemon/run/$3/state -m "$sr"
 ;;
 'setcf') #sbj=key; payload=<new value>
   cmd="setconfig \"$2\" \"$3\" \"$conf_file\" \"=\"" 
-  [[ $debug -eq 1 ]] && { echo "[debug] [daemon] [$1] [$2] command: '$cmd'"; return 0; }
+  [[ $debug -ne 2 ]] && { echo "[debug] [daemon] [$1] [$2] command: '$cmd'"; return 0; }
   eval $cmd || return 1 #execute
   $mqtt_cmd/daemon/config/$2/state -m "$3"
   #TODO: deamon reload
 ;;
 'setrt') #sbj=<runtime var>; payload=<new value>
-  cmd="$2="$(echo "$3")""
-  [[ $debug -eq 1 ]] && { echo "[debug] [daemon] [$1] [$2] command: '$cmd'"; return 0; }
-  eval $cmd || return 1 #exec
+  cmd="$2=$3"
+  [[ $debug -ne 2 ]] && { echo "[debug] [daemon] [$1] [$2] command: '$cmd'"; return 0; }
+  eval $cmd 2>/dev/null || return 1 #exec
   $mqtt_cmd/daemon/run/$2/state -m "${!2}"; return 0
 ;;
-*) [[ $debug -eq 1 ]] && echo "[debug] [daemon] '$1' has no case in \$act."
+*) [[ $debug -ne 0 ]] && echo "[debug] [daemon] '$1' has no case in \$act."
 esac
 }
 
@@ -341,20 +341,22 @@ mqtt_cmd/oscmd/json -m "$json"
 function error_handler () { ####################################################
   local error_code=$?; local error_line=$BASH_LINENO; local error_command=$BASH_COMMAND
   echo "[err] line $error_line: $error_command (exit code: $error_code)"
-  # exit 1 #optional if exit is rquired
+  # exit 1 #optional if exit is desired
 }
 
-function debug_msg () { ########################################################
-echo "[debug] [debug_msg]: ${#@}" :: $1 :: $2 :: $3 :: $4 :: $5
-}
-
-function trap_exit () {
+function trap_term () {
+local pid files f
+#restore redirect
   exec 1>&3 2>&4
-  PID=$(cat $run_path/mqtt.pid 2>/dev/null)
-  kill -s 9 $PID 2>/dev/null; rm $run_path/mqtt.pid
-  [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_disconnect:="offline"}"
+#send LWT offline message to mqtt
+  [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_disconnect:="offline"}"  
+#delete files we created in $run_path
+  files="mqtt.pid read-pid fifo heartbeat.pid watchdog.pid" #list of files to delete in $run_path
+  for f in $files;do rm $run_path/$f 2>/dev/null; done
+#finally get mosquitto_sub pid we started and terminate
+  pid=$(ps -eaf | grep "$subscriber.*$topic" | grep -v "pts" | head -1 | awk '{print $2}') #mosquitto pid
+  [[ -z $pid ]] && kill -s SIGTERM $pid 2>/dev/null
 }
-
 
 ################################################################################
 ##### start/stop functions #####################################################
@@ -362,30 +364,33 @@ function trap_exit () {
 
 function start() { #############################################################
 ###check for running mqttsub.sh process; exit 0 if exists
-#get pid of a running mqttsub.sh service
-local fldr fifo
-unset PID
-[[ -f $run_path/mqtt.pid ]] && PID=$(cat "$run_path/mqtt.pid" 2>/dev/null)
-[[ -n $PID ]] && echo "[OK] $service is already running [$PID]." && exit 0
 
-#create runtime directories
-for fldr in $run_path $log_path; do
-  mkdir -p $fldr 2>/dev/null || { echo "[FAIL] Could not create runtime '$fldr'; check your permissions!"; exit 1; }
+local pid f fifo
+#get mosquitto_pid we start identified by $subscriber and $topic
+  pid=$(ps -eaf | grep "$subscriber.*$topic" | grep -v "pts" | head -1 | awk '{print $2}') #mosquitto pid
+  [[ -n $pid ]] && echo "[OK] $service is already running [$pid]." && exit 0
+
+#create runtime directories; TODO: avoid root privileges
+for f in $run_path $log_path; do
+  mkdir -p $f 2>/dev/null || { echo "[FAIL] Could not create runtime '$f'; check your permissions!"; exit 1; }
 done
   
-#create fifo pipe
+#create fifo pipe for mosquitto_sub mqtt messages received
 fifo="$run_path/fifo" 
 [[ ! -p $fifo ]] && { mkfifo $fifo || { echo "[FAIL] Could not create '$fifo'; check your permissions!"; exit 1; }; }
 
 ### start mosquitto_sub process ####################
 ($subscriber -h $broker_ip -p $broker_port -v -t "$topic/#" >$fifo 2>/dev/null & echo $! >&3) 3>"$run_path/mqtt.pid"
-PID=$(cat $run_path/mqtt.pid) || { echo "[FAIL] $subscriber did not start!"; exit 1; }
+PID=$(cat $run_path/mqtt.pid 2>/dev/null) || { echo "[FAIL] $subscriber did not start!"; exit 1; }
 
-### begin mqtt message read daemon loop ####################
-( exec 3>&1 4>&2;exec 1>> $run_path/debug.log 2>>$log_path/error.log
+( ### subshell daemon loop ####################
+#redirect output  
+  exec 3>&1 4>&2;exec 1>> $run_path/debug.log 2>>$log_path/error.log
+#set traps to handle signals
+  [[ $debug -ne 0 ]] && trap "error_handler" ERR
   trap "[[ -f $conf_file ]] && source $conf_file" SIGHUP
-  [[ $debug -eq 1 ]] && trap "error_handler" ERR
-  trap "trap_exit" EXIT SIGKILL
+  trap "trap_term" EXIT SIGTERM
+#start main daemon loop
   while read msg <$fifo; do
 #...split mqtt message; $topic/cat/id/act/sbj <payload>
   unset id cat act sbj val
@@ -394,13 +399,12 @@ PID=$(cat $run_path/mqtt.pid) || { echo "[FAIL] $subscriber did not start!"; exi
   id=$(echo $tmp | cut -d'/' -f 2);                           #get id
   [[ $id == ?(-)+([0-9]) ]] && id="/$id" || unset id          #check if id is valid, else unset!
   tmp=${tmp/"$id/"/"/"}                                       #remove id from tmp
-
   cat="${tmp%%'/'*}";tmp=${tmp/"$cat/"/}                      #get cat=category [camera|motion|daemon|os]
   act="${tmp%%'/'*}";tmp=${tmp/"$act/"}                       #get act=action [get|set|detection|...]
   sbj=${tmp##*'/'}; [[ $act =~ $sbj ]] && unset $sbj          #get sbj=subject [debug|<config key>|
 
 #...start interpret/filter/actions here
-  [[ $debug -eq 1 ]] && { echo "[debug] received: $msg"; debug_msg $cat $id $act $sbj $val; }
+  [[ $debug -ne 0 ]] && { echo "[debug] [received] $msg"; echo "[debug] [cat|id|act|sbj val] $cat|$id|$act|$sbj $val"; }
   case $cat in
   'camera') camera_actions $id $act $sbj $val;;
   'motion') motion_actions $id $act $sbj $val;;
@@ -409,10 +413,10 @@ PID=$(cat $run_path/mqtt.pid) || { echo "[FAIL] $subscriber did not start!"; exi
   *) [[ $debug -eq 1 ]] && { echo "[debug] received $msg";echo "[debug] [loop]'$cat' has no case in \$cat."; }
   esac
 #...end interpret/filter/actions
-#  [[ -n $flag_exit ]] && break #stop or restart
+#TODO: [[ -n $flag_exit ]] && break #stop or restart
   done #exit message read daemon loop; this happens when mosquitto_sub pid is killed!
-#  [[ -n $flag_exit ]] && ($0 $flag_exit) #restart daemon from mqtt
-) & echo $! >"$run_path/read.pid" #subshell daemon end
+#TODO: [[ -n $flag_exit ]] && ($0 $flag_exit) #restart daemon from mqtt
+) & echo $! >"$run_path/read.pid" ### end subshell daemon loop
 
 ### started mqtt message daemon ####################
   [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_connect:="online"}"
@@ -420,20 +424,22 @@ PID=$(cat $run_path/mqtt.pid) || { echo "[FAIL] $subscriber did not start!"; exi
 }
 
 function stop() { ##############################################################
-#stop a running mqtt-subscribe service by sending TERM to mosquitto_sub pid.
-# this will kill mosquitto sub break the daemon while read loop causing mqtt-subscribe
-# to finish and exit
-  [[ -f "$run_path/mqtt.pid" ]] \
-    && { kill -s 9 $(cat "$run_path/mqtt.pid" 2>/dev/null);echo "[OK] $service stopped."; return $?; }
+#stop a running mqtt-subscribe service by sending SIGTERM to mosquitto_sub pid.
+# this will terminate mosquitto_sub and break the daemon's while read loop
+# causing 'mqttsubs.sh' exit gracefully.
+local pid
+  pid=$(ps -eaf | grep "$subscriber.*$topic" | grep -v "pts" | head -1 | awk '{print $2}') #mosquitto pid
+  [[ -n $pid ]] && { kill -s SIGTERM $pid 2>/dev/null;echo "[OK] $service stopped."; return 0; }
   echo "[INFO] $service is not running."; return 1
 }
 
 function status () { ###########################################################
-  PID=$(cat "$run_path/mqtt.pid" 2>/dev/null)
-  [[ -z $PID ]] && { echo "[INFO] $service is not running."; return 0; }
-  json="{\"name\":\"$service\",\"status\":\"running\",\"pid\":\"$PID\",\"topic\":\"$topic\",\"broker\":\"$broker_ip\"}"
-  msg="[OK] $service is running  [$PID].\n...Listening to topic '$topic' @ broker $broker_ip\n"
-  [[ $1 =~ 'json' ]] && echo $json || echo -e "$msg"
+local pid
+  pid=$(ps -eaf | grep "$subscriber.*$topic" | head -1 | awk '{print $2}')
+  [[ -z $pid ]] && { echo "[INFO] $service is not running."; exit 1; }
+  json="{\"$topic\":{\"service\":{\"name\":\"$service\",\"status\":\"running\",\"pid\":\"$pid\",\"topic\":\"$topic\",\"broker\":\"$broker_ip\"}}}"
+  msg="[OK] $service is running  [$pid].\n...Listening to topic '$topic' @ broker $broker_ip\n"
+  [[ $1 =~ '--json' ]] && echo $json || echo -e "$msg"
   return 0
 }
 
@@ -528,7 +534,7 @@ case $1 in
 'start') start; set_motion_events;;
 'stop') stop;;
 'restart') stop;sleep 2;start;;
-'status') status "$1";;
+'status') status "$2";;
 'debug_on') $mqtt_cmd/daemon/set -m "debug=1";;
 'debug_off') $mqtt_cmd/daemon/set -m "debug=0";;  
 'camera_ptz') camera_action "$1" "control" "$2" "$3";;
