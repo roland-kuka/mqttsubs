@@ -44,18 +44,18 @@ OVERVIEW OF MQTT TOPICS:
 * ./motion/id/
 * ../detection [ON|0|OFF|1] >> ../state [ON|0|OFF|1]
 * ../snapshot [ON|1]        >> ../state [OFF]
-* ../getcf key              >> ../id/config/key/state <value> #get config value
-* ../getrt key              >> ../id/run/key/state <value> #get runtime value
+* ../get/cf key             >> ../id/config/key/state <value> #get config value
+* ../get/rt key             >> ../id/run/key/state <value> #get runtime value
 * ../set/key value          >> ../id/config/key/state <value> #set config value
   
 * ./daemon/
-* ../getcf key              >> ../id/config/key/state <value> #get config value
-* ../getrt key              >> ../id/run/key/state <value> #get runtime variable
-* ../setcf/key value        >> ../id/config/key/state <value> #set config value
-* ../setrf/key value        >> ../id/run/key/state <value> #set config value
+* ../get/cf key              >> ../id/config/key/state <value> #get config value
+* ../get/rt key              >> ../id/run/key/state <value> #get runtime variable
+* ../set/cf/key value        >> ../id/config/key/state <value> #set config value
+* ../set/rf/var value        >> ../id/run/key/state <value> #set config value
 
 * ./oscmd/
-* ../command args           >> ../oscmd/json           #{exec:{cmd:?,args:?,res:OK,ret:?}}
+* ../command args            >> ../oscmd/json           #{exec:{cmd:?,args:?,res:OK,ret:?}}
 
 SETUP:
 1. Build a motioneyeOS with the 'mosquitto' module.
