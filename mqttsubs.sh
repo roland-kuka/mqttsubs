@@ -138,6 +138,8 @@ function run_camapi () { #######################################################
 # net camera. It will get its config from special '# &keys' in the camera-id.conf
 # You must configure '# &cam_api=' and there must be a 'netcam_url=' entry.
 local conf api ip ptzcmd cmd cmd1 cmd val sr
+[[ $debug -ne 0 ]] && trap "error_handler" ERR
+
 #get api, ip:port from config
 conf="$(dirname $motion_conf 2>/dev/null)/camera-${1:1}.conf"
 api=$(getconfig "&cam_api" "$conf" " ") || return 1
@@ -176,10 +178,11 @@ esac
 ################################################################################
 
 function camera_actions () { ###################################################
-#/id :: act :: sbj :: payload
+#/id :: act :: key1 :: payload
 #<hostname>/camera/<id>/ptz/<key> <value> >> ../<id>/ptz/<key>/state <value> 
 local ptzapi cmd cmd1 cmd val; unset ptz_cmd cmd cmd1 cmd2 val
-[[ ${#@} -lt 4 ]] && return 1
+[[ $debug -ne 0 ]] && trap "error_handler" ERR
+[[ ${#@} -ne 4 ]] && return 1
 case $2 in
 'control') 
   run_camapi "$1" "$3" "$4" || return 1
@@ -194,14 +197,15 @@ esac
 }
 
 function motion_actions () { ###################################################
-#/id :: act :: sbj :: payload
+#/id :: act :: key1 :: payload
 #<hostname>/motion/<id>/detection ON|OFF >> ../<id>/detection/state ON|OFF 
 #<hostname>/motion/<id>/snapshot ON >> ../<id>/snapshot/state OFF
 #<hostname>/motion/<id>/getcf <key> >> ../<id>/config/<key>/state <value>
 #<hostname>/motion/<id>/getrt <key> >> ../<id>/run/<key>/state <value>
 #<hostname>/motion/<id>/set/<key> <value> >> ../<id>/config/<key>/state <value>
-[[ ${#@} -lt 4 ]] && return 0
 local sr cmd cfgf mpid; unset sr cmd cfgf mpid
+[[ $debug -ne 0 ]] && trap "error_handler" ERR
+[[ ${#@} -ne 4 ]] && return 0
 case $2 in 
 'detection') #payload=command
   case $4 in
@@ -222,37 +226,41 @@ case $2 in
   [[ -n $cmd ]] && $cmd
   $mqtt_cmd/motion""$1/$2/state -m "OFF" #always send OFF to reset
 ;; 
-'getcf') #payload=key
-  [[ "${1:1}" -gt 0 ]] && cfgf="camera-${1:1}.conf" || cfgf="motion.conf"
-  cmd="getconfig \"$4\" $(dirname $motion_conf)/$cfgf ' '"
-  [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2] [$4] command: '$cmd'";return 0; }
-  sr=$(eval $cmd) || return 1 #execute
-  [[ -n $sr ]] && $mqtt_cmd/motion""$1/config/$4/state -m $sr
-;;
-'getrt') #payload=key
-  case $4 in #payload
-  'detection') 
-    cmd="$http_cmd""$1/detection/status";
-    [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2] command: '$cmd'"; return 0; }
-    sr=$($cmd) || return 1 #execute
-    case $(echo ${sr#*'status'} | tr -d '[:blank:]') in
-      'ACTIVE') sr="ON";;'PAUSE') sr="OFF"
-    esac;;
-  *)
-    cmd="$http_cmd""$1/config/get?query=$4"
-    [[ $debug -ne 0 ]] && { echo "[debug] [motion] [$2] [$4] command: '$cmd'"; return 0; }
-    sr=$($cmd | grep -i "$4") || return 1 #execute
-    [[ ! -z $sr && $? -eq 0 ]] && { sr=${sr#*'='};sr=${sr%'Done'*};sr=$(echo $sr | tr -d '[:blank:]'); }   
+'get')
+  case $3 in
+  'cf') #payload=<config key>
+    [[ "${1:1}" -gt 0 ]] && cfgf="camera-${1:1}.conf" || cfgf="motion.conf"
+    cmd="getconfig \"$4\" $(dirname $motion_conf)/$cfgf ' '"
+    [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2/$3] command: '$cmd'";return 0; }
+    sr=$(eval $cmd) || return 1 #execute
+    [[ -n $sr ]] && $mqtt_cmd/motion""$1/config/$4/state -m $sr
+  ;;
+  'rt') #payload=<runtime param>
+    case $4 in #payload
+    'detection') 
+      cmd="$http_cmd""$1/detection/status";
+      [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2/$3] command: '$cmd'"; return 0; }
+      sr=$($cmd) || return 1 #execute
+      case $(echo ${sr#*'status'} | tr -d '[:blank:]') in
+        'ACTIVE') sr="ON";;'PAUSE') sr="OFF"
+      esac;;
+    *)
+      cmd="$http_cmd""$1/config/get?query=$4"
+      [[ $debug -ne 0 ]] && { echo "[debug] [motion] [$2/$3] command: '$cmd'"; return 0; }
+      sr=$($cmd | grep -i "$4") || return 1 #execute
+      [[ ! -z $sr && $? -eq 0 ]] && { sr=${sr#*'='};sr=${sr%'Done'*};sr=$(echo $sr | tr -d '[:blank:]'); }   
+    esac
+    [[ -n $sr ]] && $mqtt_cmd/motion""$1/run/$4/state -m $sr
   esac
-  [[ -n $sr ]] && $mqtt_cmd/motion""$1/run/$4/state -m $sr
 ;;
+
 'set') #sbj=key payload=<new value>
 #key must be included in file 'whitelist' in path of $conf_file
   sr=$(cat $(dirname $conf_file)/whitelist 2>/dev/null | grep "$3")
   [[ -z $sr ]] && { $mqtt_cmd/motion""$1/config/$3/state -m "#blocked#"; return 1; }
   [[ "${1:1} " -gt 0 ]] && cfgf="camera-${1:1}.conf" || cfgf="motion.conf"
   cmd="setconfig \"$3\" \"$4\" \"$(dirname $motion_conf)/$cfgf\" ' '"
-  [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2] [$3] command: '$cmd'"; return 0; } 
+  [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2/$3] command: '$cmd'"; return 0; } 
   eval $cmd || return 1 #execute
 #  if [[ ! ${3:0:1} =~ '&' ]]; then #only if 'key=' default motion config
 #    mpid=$(ps -eaf | grep "/$motion_conf" | grep -v "pts" | awk '{print $2}')
@@ -266,52 +274,60 @@ esac
 }
 
 function daemon_actions () { ###################################################
-#act :: sbj :: payload
+#act :: key1 :: key2 :: payload
 #<hostname>/daemon/control <stop|restart> >> ../daemon/run/<param> OK 
 #<hostname>/daemon/getcf <var> >> ../daemon/config/<param>/state  
 #<hostname>/daemon/getrt <ssid|wifi|status|debug> >> ../daemon/run/<param>/state
 #<hostname>/daemon/setcf/<key> <value> >> ../daemon/config/<key>/state <value> 
 #<hostname>/daemon/setrt/<key> <value> >> ../daemon/run/<key>/state <value> 
 local sr cmd; unset sr cmd
-[[ ${#@} -ne 3 ]] && return 0 
+[[ $debug -ne 0 ]] && trap "error_handler" ERR
+[[ ${#@} -ne 4 ]] && return 0 
+
 case $1 in
 "control") #payload=action 
-  case $3 in
+  case $4 in
     "stop") flag_exit="stop";;
     "restart") flag_exit="restart";;
     "reload") kill -s SIGHUP $(cat $run_path/read.pid)
   esac
-  [[ $debug -ne 0 ]] && { echo "[debug] [daemon] [$1] command: '$cmd'" && return 0; }
+  [[ $debug -ne 0 ]] && { echo "[debug] [daemon] [$1] command: '$4'" && return 0; }
   $cmd || return 1
-  $mqtt_cmd/daemon/control/$3 -m "EXECUTED"
+  $mqtt_cmd/daemon/control/$4 -m "EXECUTED"
 ;;
-'getcf') #payload=key
-  cmd="getconfig \"$3\" \"$conf_file\" \"=\""
-  [[ $debug -ne 2 ]] && { echo "[debug] [daemon] [$1] command: $cmd"; return 0; }
-  sr=$(eval $cmd) || return 1 #execute
-  $mqtt_cmd/daemon/config/$3/state -m "${sr:=null}"
-;;
-'getrt') #payload=<runtime var>
-  case $3 in
-    "ssid"|"wifi") sr=$(iwgetid);sr="${sr#*'ESSID:'}";;
-    "status") sr=$(status --json);;
-  *) sr="${!3}"
+'get')
+  case $2 in
+  'cf') #payload=<config key>
+    cmd="getconfig \"$4\" \"$conf_file\" \"=\""
+    [[ $debug -eq 2 ]] && { echo "[debug] [daemon] [$1/$2] command: '$cmd'"; return 0; }
+    sr=$(eval $cmd) || return 1 #execute
+    $mqtt_cmd/daemon/config/$4/state -m "${sr:=null}"
+  ;;
+  'rt') #payload=<runtime var>
+    case $4 in
+      "ssid"|"wifi") sr=$(iwgetid);sr="${sr#*'ESSID:'}";;
+      "status") sr=$(status --json);;
+    *) sr="${!4}"
+    esac
+    [[ -z $sr ]] && sr="#ERR#"
+    $mqtt_cmd/daemon/run/$4/state -m "$sr"
   esac
-  [[ -z $sr ]] && sr="#ERR#"
-  $mqtt_cmd/daemon/run/$3/state -m "$sr"
 ;;
-'setcf') #sbj=key; payload=<new value>
-  cmd="setconfig \"$2\" \"$3\" \"$conf_file\" \"=\"" 
-  [[ $debug -ne 2 ]] && { echo "[debug] [daemon] [$1] [$2] command: '$cmd'"; return 0; }
-  eval $cmd || return 1 #execute
-  $mqtt_cmd/daemon/config/$2/state -m "$3"
-  #TODO: deamon reload
-;;
-'setrt') #sbj=<runtime var>; payload=<new value>
-  cmd="$2=$3"
-  [[ $debug -ne 2 ]] && { echo "[debug] [daemon] [$1] [$2] command: '$cmd'"; return 0; }
-  eval $cmd 2>/dev/null || return 1 #exec
-  $mqtt_cmd/daemon/run/$2/state -m "${!2}"; return 0
+'set')
+  case $2 in
+  'cf') #sbj=key; payload=<new value>
+    cmd="setconfig \"$3\" \"$4\" \"$conf_file\" \"=\"" 
+    [[ $debug -eq 2 ]] && { echo "[debug] [daemon] [$1/$2] command: '$cmd'"; return 0; }
+    eval $cmd || return 1 #execute
+    $mqtt_cmd/daemon/config/$3/state -m "$4"
+    #TODO: deamon reload
+  ;;
+  'rt') #sbj=<runtime var>; payload=<new value>
+    cmd="$3=$4"
+    [[ $debug -ne 2 ]] && { echo "[debug] [daemon] [$1/$2] Command: '$cmd'"; return 0; }
+    eval $cmd 2>/dev/null || return 1 #exec
+    $mqtt_cmd/daemon/run/$3/state -m "${!3}"; return 0
+  esac
 ;;
 *) [[ $debug -ne 0 ]] && echo "[debug] [daemon] '$1' has no case in \$act."
 esac
@@ -320,6 +336,7 @@ esac
 function os_actions () { ###################################################
 #act :: payload
 #<hostname>/oscmd/<cmd> <args> >> ../oscmd/json "<json>" 
+[[ $debug -ne 0 ]] && trap "error_handler" ERR
 return 0
 [[ ${#@} -ne 2 ]] && return 0 
 case $1 in
@@ -348,7 +365,7 @@ function trap_term () {
 local pid files f
 #restore redirect
   exec 1>&3 2>&4
-#send LWT offline message to mqtt
+#send LWT offline message to mqtt4
   [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_disconnect:="offline"}"  
 #delete files we created in $run_path
   files="mqtt.pid read-pid fifo heartbeat.pid watchdog.pid" #list of files to delete in $run_path
@@ -384,31 +401,31 @@ fifo="$run_path/fifo"
 PID=$(cat $run_path/mqtt.pid 2>/dev/null) || { echo "[FAIL] $subscriber did not start!"; exit 1; }
 
 ( ### subshell daemon loop ####################
+  [[ $debug -ne 0 ]] && trap "error_handler" ERR
 #redirect output  
   exec 3>&1 4>&2;exec 1>> $run_path/debug.log 2>>$log_path/error.log
 #set traps to handle signals
-  [[ $debug -ne 0 ]] && trap "error_handler" ERR
   trap "[[ -f $conf_file ]] && source $conf_file" SIGHUP
   trap "trap_term" EXIT SIGTERM
 #start main daemon loop
   while read msg <$fifo; do
 #...split mqtt message; $topic/cat/id/act/sbj <payload>
   unset id cat act sbj val
-  val=${msg#*' '};tmp=${msg%%' '*}                            #get payload >> val
-  tmp=${tmp/"$topic/"}                                        #remove main topic
-  id=$(echo $tmp | cut -d'/' -f 2);                           #get id
+  tmp=${msg%%' '*};tmp=${tmp/"$topic/"}                       #get topic; remove $topic                              #
+  id=$(echo $tmp | cut -d'/' -f 2);                           #get id (=2nd item)
   [[ $id == ?(-)+([0-9]) ]] && id="/$id" || unset id          #check if id is valid, else unset!
-  tmp=${tmp/"$id/"/"/"}                                       #remove id from tmp
+  tmp=${tmp/"$id/"/"/"}                                       #remove id
   cat="${tmp%%'/'*}";tmp=${tmp/"$cat/"/}                      #get cat=category [camera|motion|daemon|os]
-  act="${tmp%%'/'*}";tmp=${tmp/"$act/"}                       #get act=action [get|set|detection|...]
-  sbj=${tmp##*'/'}; [[ $act =~ $sbj ]] && unset $sbj          #get sbj=subject [debug|<config key>|
-
+  act="${tmp%%'/'*}";tmp=${tmp/"$act/"}                       #get act=action [get|set|detection|snapshot|control...]
+  key1="${tmp%%'/'*}";tmp=${tmp/"$key1/"}                     #key1 [rt|cf|..|<var>]
+  key2="${tmp##*'/'}"                                         #key2 [<var>]
+  val=${msg#*' '}                                             #get payload >> val
 #...start interpret/filter/actions here
   [[ $debug -ne 0 ]] && { echo "[debug] [received] $msg"; echo "[debug] [cat|id|act|sbj val] $cat|$id|$act|$sbj $val"; }
   case $cat in
-  'camera') camera_actions $id $act $sbj $val;;
-  'motion') motion_actions $id $act $sbj $val;;
-  'daemon') daemon_actions $act $sbj $val;;
+  'camera') camera_actions $id $act $key1 $val;;
+  'motion') motion_actions $id $act $key1 $val;;
+  'daemon') daemon_actions $act $key1 $key2 $val;;
   'oscmd') os_actions $act $val;;
   *) [[ $debug -eq 1 ]] && { echo "[debug] received $msg";echo "[debug] [loop]'$cat' has no case in \$cat."; }
   esac
