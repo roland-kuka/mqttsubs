@@ -149,7 +149,7 @@ ip=$(getconfig "netcam_url" "$conf" " ") || return 1
 case $api in 
 'foscam1') #api for a foscam up v1.2 e.g. ipcam01
   ptzcmd="$ip/<cmd>&user=admin&pwd="; cmd="decoder_control.cgi?command="
-  cmd1="camera_control.cgi?param="; cmd2="set_misc?<cmd>"; val="$3"
+  cmd1="camera_control.cgi?param="; cmd2="set_misc?"; val="$3"
   case $2 in
   "up") cmd+="0&onestep=${val:=1}";; 
   "stop") cmd+="1";;
@@ -187,8 +187,8 @@ case $2 in
 'control') 
   run_camapi "$1" "$3" "$4" || return 1
   case $3 in #depending on sbj return ../act/sbj/state
-  "ir") $mqtt_cmd/camera""$1/$2/$3/state -m $4;;
-  "led") $mqtt_cmd/camera""$1/$2/$3/state -m $4;;
+  "ir") $mqtt_cmd/camera""$1/$3/state -m $4;;
+  "led") $mqtt_cmd/camera""$1/$3/state -m $4;;
   esac
 ;;
 *) [[ $debug -eq 1 ]] && echo "[debug] [camera] '$2' has no case in \$act."
