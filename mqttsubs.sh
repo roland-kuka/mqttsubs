@@ -1,361 +1,330 @@
 #!/bin/bash
 ################################################################################
-# Purpose: Provide mosquitto listening daemon for motion/motioneye.            #
-# Packages: motion, mosquitto-clients, [motioneye]                             #
+# Purpose: Publish System Info to a mqtt-server.                               #
+# Packages: bc netcat-openbsd mosquitto-clients                                #
 # Version: v1.0                                                                #
-# Author: Roland Ebener                                                        #
-# Date: 2024/08/05                                                             #
+# Author: Roland Ebener                                                        # 
+# Last Change: 2024/08/09                                                      #
 ################################################################################
 
-#:L10 #ADJUST CODE IF THIS LINE CHANGES #>>> create pubstats.conf...$(sed -n 12,35p $0)...
+#:L10 #ADJUST CODE IF THIS LINE CHANGES #>>> create pubstats.conf...$(sed -n 12,52p $0)...
 
-# This config is used by 'mqttsub.sh' You must restart mqttsub.service for 
-# changes to take effect. There are many more options that can be configured
-# by the user. See main section in this script for more configurable options.
+# This config is used by pubstats.sh. You must restart pubstats.service or send
+# SIGHUP to a started/running pid for changes to take effect.
+# For poll_interval use: Y|Q|M|W;d|h|m|s; see also time2seconds() function.
+# A poll interval of -1 or '' disables polling.
+# bflag: ct cl mu su du pd dc so (temp load memu swpu dsku prcd dirc srvo)
 
 #daemon config
-debug=1
+#daemon_pi=15s        #should be less than the smallest poll_interval set
 
 #mosquitto config
-#subscriber="/usr/bin/mosquitto_sub"
-#publisher="/usr/bin/mosquitto_pub"
-#broker="127.0.0.1:1883"
-broker="192.168.1.252:1883" # You need at least a broker ip address.
-#topic="$(hostname)
-#lwt_topic="LWT"
-#lwt_connect="online"
-#lwt_disconnect="offline"
-#AlertBusTopic="ohab/security/AlertBus"
-#EventBusTopic="ohab/security/EventBus"
+# You need at least a broker ip address. The default topic is the host's name.
+broker="192.168.1.252:1883"
+#topic="myTopic"      #default=$(hostname)
+#publish_pi=          #default=5m, i.e send to mqtt bus every 5 minutes
 
-#motion config
-#motion_conf="./motion.conf"
-motion_conf="/etc/motioneye/motion.conf"
-#motion"127.0.0.1:7999"
+#poll user functions
+#wanip_provider=      #default: "https://api.ipify.org"
+#wanip_topic=         #default: "$topic/wan"
+#wanip_pi=1m          #comment or set to '-1' to disable
+#rut955_pi=1m         #comment or set to '-1' to disable
+#bind_root_pi=1M      #comment or set to '-1' to disable
 
-#:L36 #ADJUST CODE IF THIS LINE CHANGES #>>> create pubstats.conf...$(sed -n 12,35p $0)...
+#poll intervals; to disable comment or set to '-1' 
+#time spans allowed: Y)ear,Q)uarter,M)onth,W)eek,d)ays h)ours m)inutes s)econds
+#e.g. 30s = every 30 seconds; 1M = once every month; 2Q = once every 1/2 Year
+#cpu_temp_pi=30s
+#cpu_load_pi=30s
+#mem_use_pi=30s
+#swap_use_pi=30s
+#proc_degraded_pi=5m
+#disk_use_pi=3h
+#server_offline_pi=30m
+#dir_change_pi=1d
+
+#critical thresholds; when reached bflag is set
+#cpu_temp_warn=65
+#cpu_load_warn=75
+#mem_use_warn=75
+#swap_use_warn=65
+#disk_use_warn=75
+
+#:L54 #ADJUST CODE IF THIS LINE CHANGES #>>> create pubstats.conf...$(sed -n 12,52p $0))...
 
 ################################################################################
-##### HELPER FUNCTIONS #########################################################
+###### HELPER FUNCTIONS ########################################################
 ################################################################################
 
-function setconfig() { #########################################################
-#$1=key $2=value $3=path/file $4=delimiter:=' '
-#set a config key=value pair in configuration file
-local s d 
-  [[ -z $1 || -z $2 || -z $3 ]] && return 1 
-  [[ ! -f $3 ]] && return 1 || d=${4:=' '}
-#key=value already exits, replace line
-  [[ -n $(grep "^[^#]\?\s*$1$d.*" "$3") ]] && s="$1$d"                      # 'key=value'
-  [[ ${1:0:1} =~ '&' && -n $(grep "^#\?\s*$1$d.*" "$3") ]] && s="# $1$d"    # '# &key=value' 
-  [[ -n $s ]] && { sed -i "/^$s[0-9]*/c $s$2" "$3"; return 0; }             # inline sed replace line
-
-#key=value does not exist, add it
-  s=$1$d$2;s=${s/'&'/'# &'}
-  s=$(cat <<EOF
-# Added by $(basename $0), $(date '+%Y-%m-%d %H:%M:%S')
-$s
-EOF
-  );echo "$s" >> $3 && return 0 || return 1 # echo add line
+function is_valid_ip () {
+#checks string for valid ip address
+#if valid echo $1,return 0 else echo "", return 1
+  echo "$1" | grep -Eo '^(([1-9]?[0-9]|1[0-9][0-9]|2([0-4][0-9]|5[0-5]))\.){3}([1-9]?[0-9]|1[0-9][0-9]|2([0-4][0-9]|5[0-5]))$' 
+  return $?
+}
+time2seconds() {
+local input=$1; input=${input:=1s} ; default=1s
+  sed 's/Y/*24*3600*365 +/g; s/Q/*24*3600*90 +/g; s/M/*24*3600*30 +/g; s/W/*24*3600*7 +/g; s/d/*24*3600 +/g; 
+       s/h/*3600 +/g; s/m/*60 +/g; s/s/\+/g; s/+[ ]*$//g' <<< "$input" | bc
+}
+function time_elapsed() {
+# checks if a given amount of time for an identifier elapsed.
+# $1 id; eg: mem, cpu, dir, disk etc...
+# $2 time interval in format  time2seconds format, e.g. "1m"; "3m 30s"
+# returns 0 if time elapsed, 1 if not.
+local file interval previous current elapsed
+  [[ $RUNAS_DAEMON -ne 1 ]] && return 0 #time is always over!
+  [[ -z $2 ]] && return 1 #empty =~ disable!, time is never over
+  [[ "$(sed s/[^0-9,-].*// <<<$s)" -eq "-1" ]] && return 1 #disable!
+  file="$run_path/.$1.timer"
+  [[ -f $file ]] || { touch $file; return 0; } #first call, time is over!
+  current=$(date +"%s")  
+  previous=$(date +"%s" -r $file)
+  interval=$(time2seconds "$2" || return 2) # return=2 interval format, disabled
+  elapsed=$(( $current - $previous ))
+  [[ $elapsed -ge $interval ]] && { touch $file; return 0; } #time is over
+  return 1 #time is not over
+}
+function get_average () {
+local line val=0 samples=0 
+  file="$run_path/.$1.samples"; [[ -f "$file" ]] || return 1
+  while read line; do   
+    samples=$(($samples+1))
+    val=$(awk -v a=$val -v b=$line 'BEGIN { print a+b }' ) 
+  done < <(cat $file); 
+  rm $file > /dev/null 2>&1
+  echo $(awk -v a=$val -v b=$samples 'BEGIN{ printf "%0.1f", a/b }')
+}
+function send_to_log () {
+#$1=topic;$2=severity;$3=message
+local logf="$log_path/$service.log" dat="$(date "+%Y-%m-%d %H:%M:%S")" 
+  msg="[$dat] [$1] [${2^^}] $3"
+  [[ $RUNAS_DAEMON -ne 0 ]] && { echo $msg; return 0; }
+  echo $msg >> "$logf"; return 0
 }
 
-function getconfig() { #########################################################
-#$1=key $2path/file $3=delimiter:=' ' 
-#get a config value from motion:camera config file e.g. 'camera-$1.conf'
-#$1=Key $2=path/to/daemoncfg $3=delimiter [default=' ']
-  local s d 
-  [[ -z $1 || -z $2 ]] && return 1
-  [[ ! -f $2 ]] && return 1 || d=${3:=' '}
-  s=$(grep "^[^#]\?\s*$1$d.*" "$2")                                          # 'key=value'
-  [[ ${1:0:1} =~ '&' ]] && { s=$(grep "^#\?\s*$1$d.*" "$2");s=${s/'# &'/}; } # '# &key=value' 
-  s=${s#*$d};s=${s%%' '*}; #s=${s%' #'*}
-  [[ -z $s ]] && return 1 || echo $s
+################################################################################
+### DAEMON FUNCTIONS ###########################################################
+################################################################################
+
+### USER DEFINED ###############################################################
+function publish_template () {
+  #time_elapsed "<publish_template>" $<mypub_pi> || return 0
+  #...you actions
+  # $publisher -h $broker_ip -p $broker_port -t "<my/topic>" -m "<mypayload>"
+  #send_to_log "<identifier>" "<status>" "<message>"
   return 0
-} 
+}
 
-################################################################################
-##### EVENT FUNCTIONS ##########################################################
-################################################################################
-
-function set_motion_events(){ ##################################################
-#setup motion events. The 'webcontrol_parms 3' is required in 'motion.conf'.
-#available events:
-#  on_motion_detected,on_area_detected,on_camera_lost,on_camera_found
-#  on_event_start,on_event_end,on_picture_save,on_movie_start,on_movie_end
-local s sr ary=("on_motion_detected" "on_camera_found" "on_camera_lost" )
-  [[ -z $(cat $motion_conf 2>/dev/null | grep "webcontrol_parms.*3") ]] && return 0
-#loop ary and set events for current session
-  for evt in ${ary[@]};do
-    s=$(jq -rn --arg x "$(realpath $0) $evt %t" '$x|@uri')
-    cmd="$http_cmd/0/config/set?$evt=$s"
-    [[ $debug -eq 1 ]] && { echo "[debug] [set_motion_events] command: $cmd."; }
-    [[ $debug = 0 ]] && sr=$($cmd)
+function get_rut955 () {
+#get info from router RUT955
+local topic topics
+  [[ -z $rut955_pi ]] && return 1
+  time_elapsed "get_rut955" $rut955_pi || return 0
+  topics="signal connection network operator"
+  for topic in $topics;do
+    $publisher -h $broker_ip -p $broker_port -t "router/get" -m "$topic" >/dev/null 2>&1
   done
-#apply/write to motion config to make permanent
-#  sr=$($http_cmd/0/config/write)
-#  [[ $? -eq 0 ]] && { kill -s 1 $(cat /tmp/motion.pid); } #SIGHUP to reload motion config files
 }
 
-function on_motion_detected(){ #################################################
-#id :: 
-#actions to perform on mqtt bus when motion is detected by a camara
-local conf deadtime priority msg
-  [[ -z $1 ]] && { echo "[ERR] Please provide a camera id."; return 1; }
-  conf="$(dirname $motion_conf 2>/dev/null)/camera-$1}"
-  deadtime=$(getconfig "# &DeadTime" "$conf" " ")
-  priority=$(getconfig "# &Priority" "$conf" " ")
-  deadtime=${deadtime:=5}; priority=${priority:=0}
-#setup a temporary file to allow for DeadTime
-  tmpf="$run_path/.on_motion_detected.$id"
-  [[ -f $tmpf ]] && return 0 || touch $tmpf
-#publish to camera specific topic
-  $mqtt_cmd/camera/$id/motion/state -m "1";
-#publish to general/alert/event topic
-  mqtt_cmd0=${mqtt_pub%' -t'*};msg="$(hostname)::Camera-$id::AlertSent=$Priority"
-  [[ -n $AlertBusTopic && $priority -gt 0 ]] && $mqtt_pub0 -t "$AlertBusTopic" -m "$priority"
-  [[ -n $EventBusTopic ]] && $mqtt_pub0 -t "$EventBusTopic" -m "$msg"
-#time to reset motion on mqtt bus
-  ( sleep $deadtime;$mqtt_cmd/camera/$1/motion/state -m "0";rm -f $tmpf 2>/dev/null; exit 0 ) &
+function update_bind_root () {
+  time_elapsed "update_bind_root" $bind_root_pi || return 0
+  curl -s -o "/etc/bind/db.root" "https://www.internic.net/domain/named.root"
+  [[ $? -ne 0 ]] && { send_to_log "update_bind_root" "WARN" "Could not download files."; return 1; }
+  systemctl restart bind9
+  [[ $? -ne 0 ]] && { send_to_log "update_bind_root" "FAIL" "systemctl restart bind9 failed."; return 1; }
+  send_to_log "update_bind_root" "OK" "Bind9 root servers '/etc/bind/db.root' update success."
 }
 
-function on_camera_found(){ ####################################################
-#actions to perform on mqtt bus when motion is detected by a camara
-local s; unset s
-id=${$1:=0} #must have camera id
-  $mqtt_cmd/camera/$id/connected -m "1"
-  [[ -z $EventBusTopic ]] && return 0
-  s="$(hostname)::Camera-$id::found"
-  ${mqtt_cmd%' -t'*} -t $EventBusTopic -m $s
-}
-
-function on_camera_lost(){ #####################################################
-#actions to perform on mqtt bus when motion is detected by a camara
-local s; unset s
-id=${$1:=0} #must have camera id
-  $mqtt_cmd/camera/$id/connected -m "1";
-  [[ -z $EventBusTopic ]] && return 0
-  s="$(hostname)::Camera-$id::lost"
-  ${mqtt_cmd%' -t'*} -t $EventBusTopic -m $s
-}
-
-################################################################################
-##### CAM APIs #################################################################
-################################################################################
-
-function run_camapi () { #######################################################
-#/id :: cmd :: val
-#This function transforms <cmd> to a 'http command' that can be send to a 
-# net camera. It will get its config from special '# &keys' in the camera-id.conf
-# You must configure '# &cam_api=' and there must be a 'netcam_url='.
-local conf api ip ptzcmd cmd cmd1 cmd val sr
-[[ $debug -ne 0 ]] && trap "trap_error" ERR
-
-#get api, ip:port from config
-conf="$(dirname $motion_conf 2>/dev/null)/camera-${1:1}.conf"
-api=$(getconfig "&cam_api" "$conf" " ") || return 1
-ip=$(getconfig "netcam_url" "$conf" " ") || return 1
-[[ $debug -eq 1 ]] && echo "[debug] [getptz_cmd] api=$api@$ip :: $2 :: $3."
-
-case $api in 
-'foscam1') #api for a foscam up v1.2 e.g. ipcam01
-  ptzcmd="$ip/<cmd>&user=admin&pwd="; cmd="decoder_control.cgi?command="
-  cmd1="camera_control.cgi?param="; cmd2="set_misc?"; val="$3"
-  case "$2" in
-  "up") cmd+="0&onestep=${val:=1}";; 
-  "stop") cmd+="1";;
-  "down") cmd+="2&onestep=${val:=1}";; 
-  "left") cmd+="4&onestep=${val:=1}";; 
-  "right") cmd+="6&onestep=${val:=1}";;
-  "center") cmd+="25&onestep=0";;  
-  "vpatrol") cmd+="26&onestep=${val:=0}";; 
-  "hpatrol") cmd+="28&onestep=${val:=0}";; 
-  "setpreset") [[ $val -ge 1 && $val -le 32 ]] && cmd+="$(($val*2+28))" || cmd+="";;                 
-  "callpreset") [[ $val -ge 1 && $val -le 32 ]] && cmd+="$(($val*2+29))&onestep=0" || cmd+="";;
-  "ir") cmd="$cmd1""14&value=$([[ $val -gt 0 ]] && echo 1 || echo 0;)";;
-  "led") cmd="$cmd2""led_mode=$([[ $val -gt 0 ]] && echo 1 || echo 2;)"
-  esac
-  [[ ${cmd: -1} =~ '=' ]] && return 1 #no valid command
-  cmd="curl \"${ptzcmd/'<cmd>'/"$cmd"}\"" 
-  [[ $debug -eq 1 ]] && { echo "[debug] [camera] [$1] [$2] command: '$cmd'"; return 0; }
-  sr=$(eval $cmd); [[ ${sr#'='*} =~ "\"ok\"" ]] && return 0 || return 1
-;;
-'foscam2') return 1;;
-esac
-}
-
-################################################################################
-##### DAEMON FUNCTIONS #########################################################
-################################################################################
-
-function camera_actions () { ###################################################
-#/id :: act :: key1 :: payload
-#<hostname>/camera/<id>/ptz/<key> <value> >> ../<id>/ptz/<key>/state <value> 
-local ptzapi cmd cmd1 cmd val; unset ptz_cmd cmd cmd1 cmd2 val
-[[ $debug -ne 0 ]] && trap "trap_error" ERR
-[[ ${#@} -ne 4 ]] && return 1
-case $2 in
-'control') 
-  run_camapi "$1" "$3" "$4" || return 1
-  case $3 in #depending on sbj return ../act/sbj/state
-  "ir") $mqtt_cmd/camera""$1/$3/state -m $4;;
-  "led") $mqtt_cmd/camera""$1/$3/state -m $4;;
-  esac
-;;
-*) [[ $debug -eq 1 ]] && echo "[debug] [camera] '$2' has no case in \$act."
-;;
-esac
-}
-
-function motion_actions () { ###################################################
-#/id :: act :: key1 :: payload
-#<hostname>/motion/<id>/detection ON|OFF >> ../<id>/detection/state ON|OFF 
-#<hostname>/motion/<id>/snapshot ON >> ../<id>/snapshot/state OFF
-#<hostname>/motion/<id>/getcf <key> >> ../<id>/config/<key>/state <value>
-#<hostname>/motion/<id>/getrt <key> >> ../<id>/run/<key>/state <value>
-#<hostname>/motion/<id>/set/<key> <value> >> ../<id>/config/<key>/state <value>
-local sr cmd cfgf mpid; unset sr cmd cfgf mpid
-[[ $debug -ne 0 ]] && trap "trap_error" ERR
-[[ ${#@} -ne 4 ]] && return 0
-case $2 in 
-'detection') #payload=command
-  case $4 in
-  "ON"|1 ) cmd="$http_cmd""$1/detection/start";;
-  "OFF"|0 ) cmd="$http_cmd""$1/detection/pause";;
+### MONITORS ###################################################################
+function monitor_gen () {
+#Arguments: [$1] = cpu_temp || cpu_load || mem_use || swap_use
+local pi thres val msg txt device disk_use process serv cmd pname ip port
+pi="${1,,}""_pi"; pi=${!pi} #get value from "${1,,}_pi" pointer
+thres="${1,,}""_warn"; thres=${!thres};
+  time_elapsed "$1" "$pi" || return 0
+  case $1 in 
+  "cpu_temp") 
+    val=$(vcgencmd measure_temp 2>/dev/null | cut -d'=' -f2 | cut -d"'" -f1) || return 1
+    msg="CPU temperature reached $val °C.";;
+  "cpu_load") 
+    val=$(grep 'cpu ' /proc/stat | awk '{usage=100-($5*100)/($2+$3+$4+$5+$6+$7+$8)} END {printf "%0.2f", usage}') 
+#    val=$(top -b -n 1 | grep Cpu | cut -d',' -f 4);val=${val/' id'/};val=$(echo $val | cut -d'.' -f1); val=$((100 - $val))
+    msg="CPU Load reached $val %.";;
+  "mem_use") 
+    val=$(free -mt | grep "Mem:" | awk '{print $2 " " $3}' | awk '{ if($2 > 0) printf "%0.2f", $2 / $1 * 100; else print 0}')
+    msg="Memory reached $val %.";;
+  "swap_use") 
+    val=$(free -mt | grep "Swap:" | awk '{print $2 " " $3}' | awk '{ if($2 > 0) printf "%0.2f", $2 / $1 * 100; else print 0}')
+    msg="Swap space reached $val %.";;
+  "disk_use")  
+    while read line; do
+      device=$(echo $line | cut -d" " -f1)
+      disk_use=$(echo $line | cut -d" " -f5 | sed "s/%//")
+      [[ $disk_use -ge $thres ]] && txt+="${device%* }""!$disk_use%,"    
+    done < <(df -h | grep -v "tmp" | grep "/dev/")
+    txt="${txt%,*}"; msg="Disk(s) $txt reached capacity limit.";;
+  "proc_degraded")
+    while read line; do
+      [[ "$line" = "" ]] && continue
+      process=$(echo $line | cut -d":" -f1 | sed "s/ //")
+      serv=$(echo $line | cut -d":" -f2 | sed "s/ //")
+      cmd=$(echo $line | cut -d":" -f3 | sed "s/ //")
+      [[ "$(ps -A | grep $process)" != "" ]] && continue
+      txt+="${serv%* },"
+      [[ $RUNAS_DAEMON -eq 0 ]] && continue
+      #TODO test: restart service or custom program; THIS IS A HUUUGE SECURITY RISK!!!    
+      #    [[ -z $systemctl_cmd ]] && continue 
+      #    [[ -n "$(echo $cmd | grep -i default)" ]] && eval "$systemctl_cmd $serv" || $cmd &   
+    done < <(grep -v "#" $proc_list)
+    txt="${txt%,*}"; msg="Process(es) $txt degraded.";;
+  "server_offline")
+    while read line; do
+      [[ "$line" = "" ]] && continue
+      pname=$( echo $line | cut -d":" -f1 | sed "s/ //")
+      ip=$(echo $line | cut -d":" -f2 | sed "s/ //")
+      port=$(echo $line | cut -d":" -f3 | sed "s/ //")
+      if [[ -n $port && ! $port =~ "none" ]]; then
+        netcat -w 5 -z "$ip" "$port" > /dev/null 2>&1 tcp=$?
+        netcat -w 5 -uz "$ip" "$port" > /dev/null 2>&1 udp=$?
+        [[ $tcp -eq 1 && $udp -eq 1 ]] && txt+="$pname,"
+      else
+        ping -O -R -c 1 $ip > /dev/null 2>&1 || txt+="$pname,"
+      fi
+    done < <(grep -v "#" $serv_list)
+    txt="${txt%,*}"; msg="Service(s) $txt offline.";;
   *) return 1
   esac
-  [[ $debug -ne 0 ]] && { echo "[debug] [motion] [$2] command: '$cmd'"; return 0; }
-  [[ -n $cmd ]] && $cmd 
-  $mqtt_cmd/motion""$1/$2/state -m ${$4^^} 
-;;
-'snapshot') #payload=command
-  case $4 in
-  "ON"|1) cmd="$http_cmd""$1/action/snapshot";;
-  *) : #do nothing
-  esac 
-  [[ $debug -ne 0 ]] && { echo "[debug] [motion] [$2] command: '$cmd'"; return 0; }
-  [[ -n $cmd ]] && $cmd
-  $mqtt_cmd/motion""$1/$2/state -m "OFF" #always send OFF to reset
-;; 
-'get')
-  case $3 in
-  'cf') #payload=<config key>
-    [[ "${1:1}" -gt 0 ]] && cfgf="camera-${1:1}.conf" || cfgf="motion.conf"
-    cmd="getconfig \"$4\" $(dirname $motion_conf)/$cfgf ' '"
-    [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2/$3] command: '$cmd'";return 0; }
-    sr=$(eval $cmd) || return 1 #execute
-    [[ -n $sr ]] && $mqtt_cmd/motion""$1/config/$4/state -m $sr
-  ;;
-  'rt') #payload=<runtime param>
-    case $4 in #payload
-    'detection') 
-      cmd="$http_cmd""$1/detection/status";
-      [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2/$3] command: '$cmd'"; return 0; }
-      sr=$($cmd) || return 1 #execute
-      case $(echo ${sr#*'status'} | tr -d '[:blank:]') in
-        'ACTIVE') sr="ON";;'PAUSE') sr="OFF"
-      esac;;
-    *)
-      cmd="$http_cmd""$1/config/get?query=$4"
-      [[ $debug -ne 0 ]] && { echo "[debug] [motion] [$2/$3] command: '$cmd'"; return 0; }
-      sr=$($cmd | grep -i "$4") || return 1 #execute
-      [[ ! -z $sr && $? -eq 0 ]] && { sr=${sr#*'='};sr=${sr%'Done'*};sr=$(echo $sr | tr -d '[:blank:]'); }   
-    esac
-    [[ -n $sr ]] && $mqtt_cmd/motion""$1/run/$4/state -m $sr
-  esac
-;;
-
-'set') #sbj=key payload=<new value>
-#key must be included in file 'whitelist' in path of $conf_file
-  sr=$(cat $(dirname $conf_file)/whitelist 2>/dev/null | grep "$3")
-  [[ -z $sr ]] && { $mqtt_cmd/motion""$1/config/$3/state -m "#blocked#"; return 1; }
-  [[ "${1:1} " -gt 0 ]] && cfgf="camera-${1:1}.conf" || cfgf="motion.conf"
-  cmd="setconfig \"$3\" \"$4\" \"$(dirname $motion_conf)/$cfgf\" ' '"
-  [[ $debug -eq 2 ]] && { echo "[debug] [motion] [$2/$3] command: '$cmd'"; return 0; } 
-  eval $cmd || return 1 #execute
-#  if [[ ! ${3:0:1} =~ '&' ]]; then #only if 'key=' default motion config
-#    mpid=$(ps -eaf | grep "motion.*$motion_conf" | head -1 | awk '{print $2}')
-#    [[ -n $mpid ]] || return 1
-#    kill -s SIGHUP $mpid || { $mqtt_cmd/motion""$1/config/$3/state -m "#ERR#}"; return 0; } 
-#  fi
-  $mqtt_cmd/motion""$1/config/$3/state -m "$4"  
-;;  
-*) [[ $debug -ne 0 ]] && echo "[debug] [motion] '$2' has no case in \$act."
-esac
+#cli only echo $val || $txt; absolutely no disk operations
+  [[ $RUNAS_DAEMON -eq 0 && -n $val ]] && { echo "$val"; return 0; }
+  [[ $RUNAS_DAEMON -eq 0 ]] && { echo ${txt:="none"}; return 0; }
+#daemon disk operations: clear flag, [save sample, write log, set flag]
+  [[ $run_path/.$1.flag ]] && rm $run_path/.$1.flag > /dev/null 2>&1
+  [[ -n $val ]] && echo  $val >> $run_path/.$1.samples  
+  [[ $(echo $val | cut -d'.' -f1) -ge $thres ]] && txt="$val"
+  [[ -n $txt ]] && { send_to_log "monitor_gen>>$1" "WARN" "$msg"; echo "$1:|""$txt" > $run_path/.$1.flag; }
+  return 0
 }
 
-function daemon_actions () { ###################################################
-#act :: key1 :: key2 :: payload
-#<hostname>/daemon/control <stop|restart> >> ../daemon/run/<param> OK 
-#<hostname>/daemon/getcf <var> >> ../daemon/config/<param>/state  
-#<hostname>/daemon/getrt <ssid|wifi|status|debug> >> ../daemon/run/<param>/state
-#<hostname>/daemon/setcf/<key> <value> >> ../daemon/config/<key>/state <value> 
-#<hostname>/daemon/setrt/<key> <value> >> ../daemon/run/<key>/state <value> 
-local sr cmd pid; unset sr cmd pid
-[[ $debug -ne 0 ]] && trap "trap_error" ERR
-[[ ${#@} -ne 4 ]] && return 0 
-
-case $1 in
-"control") #payload=action 
-  case $4 in
-    "stop") flag_exit="stop";;
-    "restart") flag_exit="restart";;
-    "reload") pid=$(ps -eaf | grep "$(basename $0).*start$" | head -1 | awk '{print $2}')
-      kill -s SIGHUP $pid 2>/dev/null
-  esac
-  [[ $debug -ne 0 ]] && { echo "[debug] [daemon] [$1] command: '$4'" && return 0; }
-  $cmd || return 1
-  $mqtt_cmd/daemon/control/$4 -m "EXECUTED"
-;;
-'get')
-  case $2 in
-  'cf') #payload=<config key>
-    cmd="getconfig \"$4\" \"$conf_file\" \"=\""
-    [[ $debug -eq 2 ]] && { echo "[debug] [daemon] [$1/$2] command: '$cmd'"; return 0; }
-    sr=$(eval $cmd) || return 1 #execute
-    $mqtt_cmd/daemon/config/$4/state -m "${sr:=null}"
-  ;;
-  'rt') #payload=<runtime var>
-    case $4 in
-      "ssid"|"wifi") sr=$(iwgetid);sr="${sr#*'ESSID:'}";;
-      "status") sr=$(status --json);;
-    *) [[ "$4" =~ ^[a-zA-Z][a-zA-Z0-9_]*$ ]] && sr="${!4}" || return 1
-    esac
-    [[ -z $sr ]] && sr="#ERR#"
-    $mqtt_cmd/daemon/run/$4/state -m "$sr"
-  esac
-;;
-'set')
-  case $2 in
-  'cf') #key2=<config key>; payload=<new value>
-    cmd="setconfig \"$3\" \"$4\" \"$conf_file\" \"=\"" 
-    [[ $debug -eq 2 ]] && { echo "[debug] [daemon] [$1/$2] command: '$cmd'"; return 0; }
-    eval $cmd || return 1 #execute
-    $mqtt_cmd/daemon/config/$3/state -m "$4"
-    #TODO: deamon reload
-  ;;
-  'rt') #key2=<runtime var>; payload=<new value>
-    [[ "$3" =~ ^[a-zA-Z][a-zA-Z0-9_]*$ ]] && cmd="$3=$4" || return 1
-    [[ $debug -ne 2 ]] && { echo "[debug] [daemon] [$1/$2] Command: '$cmd'"; return 0; }
-    eval $cmd 2>/dev/null || return 1 #exec
-    $mqtt_cmd/daemon/run/$3/state -m "${!3}"; return 0
-  esac
-;;
-*) [[ $debug -ne 0 ]] && echo "[debug] [daemon] '$1' has no case in \$act."
-esac
+function monitor_dir_change () {
+local initf scanf line tmpf file dat tmpf dcs divf
+  time_elapsed "dir_change" $dir_change_pi || return 0
+  [[ ! -f $dir_list ]] && return 0
+  [[ $RUNAS_DAEMON -eq 0 ]] && { echo "monitor_dir_change only possible in daemon mode!"; return 0; }
+  initf="$run_path/.dir_init.lst"
+  scanf="$run_path/.dir_scan.lst"
+#scan files 
+  while read line; do
+      line=$(echo $line | sed "s/ //")
+      [[ "$line" == "" ]] &&  continue
+      while read file; do
+        [[ ! -d "$file" ]] && echo $(md5sum "$file" 2>/dev/null ) >> "$scanf"
+      done < <(find "$line" -type f 2> /dev/null)
+  done < <(grep -v "#" $dir_list) 
+#if this is an initial scan 
+  [[ -f $initf ]] || { mv "$scanf" "$initf" > /dev/null 2>&1; return 0; }
+#clear flag
+  [[ $run_path/.dir_change.flag ]] && rm $run_path/.dir_change.flag > /dev/null 2>&1
+#compare md5sums
+  tmpf="$run_path/.dir_diff.tmp"
+  diff -u "$initf" "$scanf" > "$tmpf"
+  dcs=$(ls -l "$tmpf" | cut -d" " -f5) #dcs>0 if changes are detected 
+#no files have changed: remove tmpf,scanf
+  [[ $dcs -eq 0 ]] && { rm "$tmpf" "$scanf"; return 0; }
+#files have changed: set flag, create log, move scan to init, write log
+  echo $dcs > $run_path/.dir_change.flag
+  divf="$log_path/dir_diff_$(date "+%Y-%m-%d_%H:%M:%S").lst"
+  cat $tmpf | grep "^[-+]" > "$divf"; rm $tmpf; 
+  mv "$scanf" "$initf" > /dev/null 2>&1
+  send_to_log "monitor_dir_change" "WARN" "Some files changed on disk. Please check $dirdiff."
+  return 0
 }
 
-function os_actions () { ###################################################
-#act :: payload
-#<hostname>/oscmd/<cmd> <args> >> ../oscmd/json "<json>" 
-[[ $debug -ne 0 ]] && trap "trap_error" ERR
-[[ ${#@} -ne 2 ]] && return 0 
-case $1 in
-'demo') cmd="demo $2"; sr="result of pseudo just for demo";;
-'ls') return 0; cmd="ls $2"; sr="$(echo $(eval "$cmd"))";;
-*) return 0
-esac
-json="{\"$topic\":{\"exec\":{\"cmd\":\"$1\",\"args\":\"$2\",\"res\":\""$sr"\"}}}"
-$mqtt_cmd/oscmd/json -m "$json"
+### PUBLISHERS #################################################################
+function publish_json() {
+local warn bflag flag avg flags_json val avgs_json strings_json
+  time_elapsed "publish_json" $publish_pi || return 0
+  [[ $RUNAS_DAEMON -eq 0 ]] && return 0
+#flags json format: "<name>":<[0|1]>,...
+  unset bflag warn=0
+  for flag in cpu_temp cpu_load mem_use swap_use disk_use proc_degraded \
+            dir_change server_offline; do
+    file="$run_path/.$flag.flag"
+    if  [[ -f "$file" ]]; then
+      flags_json+="\"$flag\":1,"; bflag+=1; ((warn++))    
+      dynvar="${flag^^}=\"$(cat $file 2>/dev/null | cut -d'|' -f2)\""; eval "$dynvar" 
+    else
+      flags_json+="\"$flag\":0,"; bflag+=0
+    fi
+  done; 
+  flags_json="\"warn\":${warn:=0},\"bflag\":\"$bflag\""  #flags short form
+#  flags_json="$flags_json,${flags_json%,*}"        #flags extended form
+#avgs json format: "<name>":value,...
+  for avg in cpu_temp cpu_load mem_use swap_use ; do
+    val=$(get_average $avg)
+    avgs_json+="\"$avg\":$val,"
+  done; avgs_json=${avgs_json%,*}
+#strings json format: "<name>":"<text>",... 
+  PROC_DEGRADED=${PROC_DEGRADED:="none"}
+  SERVER_OFFLINE=${SERVER_OFFLINE:="none"}
+  DISK_USE=${DISK_USE:="none"}
+  strings_json="\"degraded\":\"$PROC_DEGRADED\",\"offline\":\"$SERVER_OFFLINE\",\"diskwarn\":\"$DISK_USE\""
+#json format: {"avgs":{AVGS},"strings":{STRINGS},flags":{FLAGS}}
+  json="{\"lupdt\":\"$(date "+%s")\",\"avgs\":{$avgs_json},\"strings\":{$strings_json},\"flags\":{$flags_json}}"
+#publish output to...  
+  [[ $MQTT_JSON_TT -eq 1 ]] && { echo $json >&3; return 0; } 
+  $publisher -h $broker_ip -p $broker_port -t "$topic/json" -m "$json" > /dev/null 2>&1
+  return 0
+}
+
+function publish_wanip() {
+local ipf onlf offlf ip last_ip since current previous totoffl val json 
+  wanip_provider=${wanip_provider:="https://api.ipify.org"}   
+  wanip_topic=${wanip_topic:="$topic/wan"} 
+  time_elapsed "publish_wanip" $wanip_pi || return 0
+  ipf=$run_path/.wan_ip.dat
+  onlf=$run_path/.wan_online.timer
+  offlf=$run_path/.wan_offline.timer
+  ip=$(curl -s $wanip_provider) #get wan ip
+  ip=$(is_valid_ip $ip)
+  case $? in
+  0) #internet OK
+    last_ip=$(cat $ipf 2> /dev/null) || last_ip="n/a"
+    [[ "$ip" =~ "$last_ip" ]] || echo $ip > $ipf
+    [[ -f $onlf ]] || touch $onlf
+    since=$(date "+%s" -r $onlf)   
+    json="\"lupdt\":\"$(date "+%s")\",\"status\":\"online\",\"since\":\"$since\",\"ip\":\"$ip\""  
+ #save total offline time in seconds
+    if [[ -f $offlf ]]; then   
+      current=$(date +"%s"); previous=$(date +"%s" -r $offlf)
+      totoffl=$(cat ${offlf/'.timer'/'.dat'} 2>/dev/null)
+      totoffl=$(( $current - ${previous:=0} + ${totoffl:=0} ))
+      echo $totoffl > ${offlf/'.timer'/'.dat'}    
+      rm $offlf >/dev/null 2>&1
+    fi;;
+  *|6) #no internet! start
+    if [[ ! -f $offlf ]]; then
+      touch $offlf; tiofft="00:00:00"; tioffs=0
+    else   
+      since=$(date "+%s" -r $offlf)
+    fi
+    json="\"lupdt\":\"$(date "+%s")\",\"status\":\"offline\",\"since\":\"$since\",\"ip\":\"n/a\""
+    rm $onlf >/dev/null 2>&1;;             
+  esac  
+#calculate offline percent since start of $0; final build json
+  since=$(date +"%s" -r "$run_path/$service.pid")
+  totoffl=$(cat ${offlf/'.timer'/'.dat'} 2>/dev/null)
+  json="$json,\"offlt\":${totoffl:=0}" 
+  totoffl=$(echo "${totoffl:=0}" "$since" | awk '{ if($2 > 0) printf "%0.4f", ($1/$2)*100; else print 0}')
+  json="$json,\"offltp\":${totoffl:=0}"
+#publish output to... 
+  json="{\"wan\":{$json}}" 
+#json  {"wan":{"status":"online","since":"2024-07-07 15:04:19","ip":"191.39.141.210","offlt:34,"offltp":1.3]}
+  
+#publish output to...
+  [[ $MQTT_JSON_TT -eq 1 ]] && { echo $json >&3; return 0;} 
+  $publisher -h $broker_ip -p $broker_port -t "$wanip_topic/json" -m "$json" > /dev/null 2>&1
+  return 0
 }
 
 ################################################################################
@@ -370,7 +339,7 @@ local pkg miss err_pkg uinp
   done
 #user interface
   if [[ -n "$miss" ]]; then
-    read -t 10 -n 3 -p "# Missing packages '$miss'.Enter YES to install now." uinp
+    read -t 10 -n 3 -p "# Missing packages '$miss'. Install now? [YES]." uinp
     case $uinp in
     'YES') echo -e "\n# Install missing packages...";;
     *) echo -e "[ERR] Missing packages not installed, please install $packages manually."; return 10;;
@@ -389,9 +358,65 @@ local pkg miss err_pkg uinp
 function install_program () { ##################################################
 local dst
   dst="$prog_path/$(basename $0)"
-  echo "# Copy '$(basename $0)' to $dst."
+  echo "# Copy '$(basename $0)' to $dst"
   cp $0 $dst && chown root:root $dst && chmod 751 $dst && return 0
   return 21
+}
+
+
+function install_config () { ###################################################
+local uinp conf_path
+conf_path="/etc/$service"
+  echo "# Create default config in $conf_path."
+#check if $conf_path exists.
+  [[ -d $conf_path ]] && {
+     read -t 10 -n 3 -p "# Config in $conf_path already exists. Overwrite ALL? [YES]." uinp
+     case $uinp in
+     'YES') echo -e "\n# Overwrite existing config in $conf_path.";;
+     *) echo -e "[OK] Using existing config in $conf_path."; return 0;;
+     esac; }
+
+#TODO: Use defaults section in main to build default config
+#sed to split:  s="variable=${variable:="value"}" >> var=variable, value="value"
+# var=$(echo $s | sed -e 's/\(^.*\)\=$.*/\1/p')
+# value=$(echo $s | sed 's/.*\(\${.*}\).*/\1/p' | sed 's/.*:=\(.*\)}.*/\1/')
+
+#create .conf...
+  mkdir -p  $conf_path || return 41
+  cat > $conf_path/$service.conf <<EOF || return 42
+#Default config file for $service, created $(date '+%Y-%m-%d %H:%M:%S').
+$(sed -n 12,52p $0)
+EOF
+  echo "[OK] Default '$service.conf' created in $conf_path."
+
+#create pubstats/list.d/...
+  cat > "$conf_path/proc.list" <<EOF || return 43
+# Here you can add a list of services to monitor. If one is down it 
+# can be restarted by executing the default systemctl command.
+#
+# If you are monitoring a custom process you can specify a custom
+# command to restart it.
+#
+# Examples:
+# [Process] : [Service] : [Start Command]
+#apache : apache2 : default
+#named : bind9 : default
+#custom : myscript : /usr/sbin/myscript --start
+EOF
+  cat > "$conf_path/dir.list" <<EOF || return 44
+# List of directories scanned for changes. The files on these directories should
+# not change such as:
+#/usr/sbin
+#/etc
+EOF
+  cat > "$conf_path/serv.list" <<EOF || return 45
+# List of hostnames or ip's which can be 'pinged' to see if they are alive.
+# Example:
+# [Service]:[Server]:[Port]
+#somename:192.168.1.251:8443
+#serviceX:roli-srv0.roli.lan
+EOF
+  echo "[OK] Default list.d/???.list files created in $conf_path."
 }
 
 function install_systemd () { ##################################################
@@ -404,7 +429,7 @@ After=network.target
 
 [Service]
 Type=forking
-ExecStart=/bin/bash -c "$prog_path/${basename $0} start"
+ExecStart=/bin/bash -c "$prog_path/$(basename $0) start"
 RemainAfterExit=yes
 
 [Install]
@@ -413,9 +438,9 @@ EOF
 #daemon-reload+enable+start
   systemctl daemon-reload || { echo ":( systemctl daemon-reload failed."; return 32; }
   echo -e "[OK] Installed $service.service."
-  read -t 10 -n 3 -p "# Do you want to enable and start $service.service?" uinp
+  read -t 10 -n 3 -p "# Do you want to enable and start $service.service? [y|Y]" uinp
   case $uinp in
-  'YES') 
+  'y'|'Y') 
      systemctl enable $service.service || { echo ":( Could not enable $service.service"; return 33; }
      systemctl start $service.service || { echo ":( Could not start $service.service"; return 34; }
   ;;
@@ -424,31 +449,12 @@ EOF
   esac
 }
 
-function install_config () { ###################################################
-local uinp conf_path
-conf_path="$(dirname $conf_file)"
-  echo "# Create default config in $conf_path."
-#check if $conf_path exists.
-  [[ -d $conf_path ]] && {
-     read -t 10 -n 3 -p "# Config in $conf_path already exists. YES to overwrite ALL." uinp
-     case $uinp in
-     'YES') echo "# Overwrite existing config in $conf_path.";;
-     *) echo -e "[OK] Using existing config in $conf_path."; return 0;;
-     esac; }
-#create .conf...
-  mkdir -p  $conf_path || return 41
-  cat > $conf_file <<EOF || return 42
-#Default config file created $(date '+%Y-%m-%d %H:%M:%S').
-$(sed -n 12,35p $0))
-EOF
-  echo "[OK] Default '$service.conf' created in $conf_path."
-}
-
-function setup() { #############################################################
+function setup { ###############################################################
+local uinp
 [[ $EUID -ne 0 ]] && { echo "[FAIL] You are not root!. Only root can install this program."; exit 1; }
   install_packages || { echo "[FAIL] [$?] Could not install required packages."; exit 1; }
-  install_program || { echo "[FAIL] [$?] Could not install ${basename $0}."; exit 1; }
-#  install_config || { echo "[FAIL] [$?] Could not install default config file."; exit 1; }
+  install_program || { echo "[FAIL] [$?] Could not install $(basename $0)."; exit 1; }
+  install_config || { echo "[FAIL] [$?] Could not install default config file."; exit 1; }
   install_systemd || { echo "[FAIL] [$?] Could not install systemd unit file."; exit 1; }
 }
 
@@ -458,7 +464,7 @@ function setup() { #############################################################
 
 function trap_error () { #######################################################
 #error trap called on ERR
-  local dat=$(date "+%Y-%m-%d %H:%M:%s") code=$? line=$BASH_LINENO cmd=$BASH_COMMAND
+  local dat=$(date "+%Y-%m-%d %H:%M:%S") code=$? line=$BASH_LINENO cmd=$BASH_COMMAND
   echo "[$dat] [ERR@$line>>$code] $cmd" >> $log_path/error.log
   # exit 1 #optional if exit is desired
 }
@@ -467,13 +473,11 @@ function trap_term () { ########################################################
 #terminate trap called on EXIT or SIGTERM
 local pid files f
 #send LWT offline message to mqtt
-  [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_disconnect:="offline"}"  
-#terminate mosquitto_sub
-  pid=$(cat $run_path/mqtt.pid 2>/dev/null)
-  [[ -n $pid ]] && kill -s SIGTERM $pid 2>/dev/null
-#delete all files we created in $run_path
-  rm -rf $run_path/* 2>/dev/null
-exit
+  $publisher -h $broker_ip -p $broker_port -t "$topic/$service/LWT" -m "offline" > /dev/null 2>&1
+#delete files we created in $run_path
+  files="*.pid .*.timer .*.dat .*.samples .*.lst" #TODO: complete list!!! list of files to delete in $run_path
+  for f in $files;do rm -f $run_path/$f 2>/dev/null; done
+  exit 0
 }
 
 ################################################################################
@@ -482,81 +486,57 @@ exit
 
 function start() { #############################################################
 #start daemon; save pid to $run_path/$service.pid
-#check running, prep, mosquitto_sub &, loop, started
-local pid f fifo
+#check running,prep,loop,started
+local pid f
 
-##check if already running
-  pid=$(cat $run_path/mqtt.pid 2>/dev/null)
-  [[ -n $pid ]] && echo "[OK] $service is already running [$pid]." && exit 0
+#check if already running
+pid=$(cat $run_path/$service.pid 2>/dev/null)
+[[ -n $pid ]] && echo "[OK] $service is already running [$pid]." && exit 0
 
 #create runtime folders; TODO: avoid root privileges
 for f in $run_path $log_path; do
   mkdir -p $f 2>/dev/null || { echo "[FAIL] Could not create runtime '$f'; check your permissions!"; exit 1; }
-done; cd $run_path
-  
-#create fifo pipe for mosquitto_sub mqtt messages received
-fifo="$run_path/fifo" 
-[[ ! -p $fifo ]] && { mkfifo $fifo || { echo "[FAIL] Could not create '$fifo'; check your permissions!"; exit 1; }; }
+done; cd "$run_path"
 
-### start mosquitto_sub process ####################
-($subscriber -h $broker_ip -p $broker_port -v -t "$topic/#" >$fifo 2>/dev/null & echo $! >&3) 3>"$run_path/mqtt.pid"
-pid=$(cat $run_path/mqtt.pid 2>/dev/null)
-[[ -z $pid ]] && { echo "[FAIL] $subscriber did not start!"; exit 1; }
-
-trap "[[ -f $conf_file ]] && source $conf_file" SIGHUP
+trap "[[ -f $conf_ufi ]] && source $conf_ufi" SIGHUP
 trap "trap_term" SIGTERM
 trap "trap_error" ERR
 ( ### start daemon loop ####################
-  #redirect stdin stdout stderr
-  exec 0<&- 1>>$log_path/$service.log 2>>$log_path/error.log
+  RUNAS_DAEMON=1
+#redirect stdin stdout stderr
+   exec 0<&- 1>>$log_path/$service.log 2>>$log_path/error.log
 #set traps to handle signals
   trap "trap_term" EXIT
-  [[ $debug -ne 0 ]] && trap "trap_error" ERR
 #start main daemon loop
-  while read msg <$fifo; do
-#...split mqtt message; $topic/cat/id/act/sbj <payload>
-  unset id cat act sbj val
-  tmp=${msg%%' '*};tmp=${tmp/"$topic/"}                       #get topic; remove $topic                              #
-  id=$(echo $tmp | cut -d'/' -f 2);                           #get id (=2nd item)
-  [[ $id == ?(-)+([0-9]) ]] && id="/$id" || unset id          #check if id is valid, else unset!
-  tmp=${tmp/"$id/"/"/"}                                       #remove id
-  cat="${tmp%%'/'*}";tmp=${tmp/"$cat/"/}                      #get cat=category [camera|motion|daemon|os]
-  act="${tmp%%'/'*}";tmp=${tmp/"$act/"}                       #get act=action [get|set|detection|snapshot|control|<cmd>...]
-  key1="${tmp%%'/'*}";tmp=${tmp/"$key1/"}                     #key1 [rt|cf|..|<var>]
-  key2="${tmp##*'/'}"                                         #key2 [<var>]
-  val=${msg#*' '}                                             #get payload >> val
-#...start interpret/filter/actions here
-  [[ $debug -ne 0 ]] && { echo "[debug] [received] $msg"; echo "[debug] [cat|id|act|sbj val] $cat|$id|$act|$sbj $val"; }
-  case $cat in
-  'camera') camera_actions $id $act $key1 "$val";;
-  'motion') motion_actions $id $act $key1 "$val";;
-  'daemon') daemon_actions $act $key1 $key2 "$val";;
-  'oscmd') os_actions $act "$val";;
-  *) [[ $debug -eq 1 ]] && { echo "[debug] received $msg";echo "[debug] [loop]'$cat' has no case in \$cat."; }
-  esac
-#...end interpret/filter/actions
-#TODO: [[ -n $flag_exit ]] && break #stop or restart
-  done #end daemon loop; trapped (this happens when mosquitto_sub pid is killed)
-#TODO: [[ -n $flag_exit ]] && ($0 $flag_exit) #restart daemon from mqtt
-) & # end subshell daemon loop
+  while :;do
+    get_rut955; update_bind_root
+    monitor_gen "cpu_temp"
+    monitor_gen "mem_use"; monitor_gen "swap_use"; monitor_gen "cpu_load"
+    monitor_gen "disk_use"; monitor_gen "proc_degraded"; monitor_gen "server_offline"
+    monitor_dir_change
+    publish_json;publish_wanip
+    sleep "$(time2seconds ${daemon_pi:=15s})"
+done  #end daemon loop; trapped! 
+) & echo $! > $run_path/$service.pid; pid=$(cat $run_path/$service.pid)
 
 ### started daemon ####################
-  [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_connect:="online"}"
+  $publisher -h $broker_ip -p $broker_port -t "$topic/$service/LWT" -m "online" > /dev/null 2>&1
   echo "[OK] Started '$service' [$pid]."
-exit 0  
+exit 0
 }
 
 function stop() { ##############################################################
-#stop a running daemon service by sending SIGTERM to mosquitto_sub.
+#stop a running deamon by sending SIGTERM to pid
 local pid
-  pid=$(cat $run_path/mqtt.pid 2>/dev/null)
-  [[ -z $pid ]] && { echo "[INFO] $service is not running."; exit 1; } 
+  pid=$(cat $run_path/$service.pid 2>/dev/null)
+  [[ -z $pid ]] && { echo "[INFO] $service is not running."; exit 1; }
   kill -s SIGTERM $pid 2>/dev/null && { echo "[OK] $service stopped."; exit 0; }
 }
 
 function status () { ###########################################################
-local pid
-  pid=$(cat $run_path/mqtt.pid 2>/dev/null)
+local pid json msg
+#get status of running daemon
+  pid=$(cat $run_path/$service.pid 2>/dev/null)
   [[ -z $pid ]] && { echo "[INFO] $service is not running."; exit 1; }
   json="{\"$topic\":{\"service\":{\"name\":\"$service\",\"status\":\"running\",\"pid\":\"$pid\",\"topic\":\"$topic\",\"broker\":\"$broker_ip\"}}}"
   msg="[OK] $service is running  [$pid].\n...Listening to topic '$topic' @ broker $broker_ip\n"
@@ -564,101 +544,103 @@ local pid
   return 0
 }
 
-#TODO: function watchdog () { #########################################################
-# this will scan motion.log for fatal daemon error and then try to restart via http command
-# key: "[0:motion] [ERR] [ALL] motion_watchdog: Thread 1 - Watchdog timeout did NOT restart, killing it!"
-#  [[ -f $run_path/watchdog.pid ]] && return 0
-#  ( trap rm $RUNPATH/watchdog.pid 2>/dev/null EXIT
-#    (tail -Fn0 "$motion_log" & echo $! >&3) 3>"$run_path/watchdog.pid" | \
-#    while read line ; do
-#      $(echo $line | grep "\\[0:motion\\].* \\[ERR\\].*killing it!" >/dev/null 2>&1) || continue
-#      $http_cmd/0/action/restart && $mqtt_pub/$lwt_topic -m "$lwt_connect"
-#      echo "[$(date '+%Y/%m/%d %T')] [WD] [WRN] Restart motion daemon via http command."
-#  done ) &
-#}
-
-#TODO: function heartbeat () { ########################################################
-#  [[ -f $run_path/heartbeat.pid ]] && return 0
-#  ( trap rm $run_path/hearbeat.pid EXIT
-#    while :;do
-#    local js
-#      js+="{\"Time\": \"$(date +%Y-%m-%d' '%T)\","
-#      js+="\"Uptime\": \"$(cat /proc/uptime | cut -d ' ' -f 1)\","
-#      js+="\"ip\": \"$(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1')\""
-#      js+=" }"; $mqtt_cmd/tele/json -m "$js"
-#      sleep "$tele_interval"
-#  done ) & echo "$!" >"$run_path/heartbeat.pid"
-#}
-
 ################################################################################
-##### HELP/USAGE FUNCTIONS #####################################################
+### HELP/USAGE FUNCTIONS #######################################################
 ################################################################################
 
-function showuse () { ####################################################
+function showuse() {
 cat <<EOF
 ##### ABOUT ####################################################################
-'mqttsubs.sh' is a bash script to enable control of motioneye via the 
- mqtt protocol. It uses mosquitto-clients package to subscribe- and publish
- to '$topic/#'. 
-  
-Usage: $> ./$(basename $0) [start|stop|restart|status]
+'pubstats.sh' is a bash script to publish system statistics using the 
+ mqtt protocol. It is setup as a service and provides data on cpu, memory, 
+ disks, services and servers-ip. It can  scan selected folders for changes.
+ A warn-flag is set and published to display anormalities.
+
+USAGE: $> ./$(basename $0) [start|stop|restart|status] [options]
+...[monitor (temp|cpu|mem|disk]) ]
+
 EOF
+exit 1
 }
 
 ################################################################################
-##### MAIN #####################################################################
+### MAIN #######################################################################
 ################################################################################
 #program static defs do NOT change!
+ME=$(dirname $(readlink -f "$0"))
 prog_path="/usr/sbin" #used during setup to copy this script
-conf_file="/etc/mqttsubs.conf"
-packages="bc motion mosquitto-clients"
-service="${service:="mqttsubs"}"
-run_path="${run_path:="/var/run/$service"}"
-log_path="${log_path:="/var/log/$service"}"
-[[ -f $conf_file ]] && source "$conf_file"
+packages="bc netcat-openbsd mosquitto-clients"
+service=${service:="pubstats"}
+run_path=${run_path:="/var/run/$service"}
+log_path=${log_path:="/var/log/$service"}
+
+conf_ufi="/etc/$service/$service.conf" #default when installed
+[[ ! -f $conf_ufi ]] && conf_ufi="$ME/pubstats.conf" #fallback
+[[ -f $conf_ufi ]] && source "$conf_ufi"
 
 #-- defaults, can be part of a config file -------------------------------------
 #defaults daemon
-debug=${debug:=0}
+daemon_pi=15s #in seconds! this should be set to ~0.5x smallest PI.
 
 #defaults mosquitto
-subscriber="${subscriber:="/usr/bin/mosquitto_sub"}"
-publisher="${publisher:="/usr/bin/mosquitto_pub"}"
+publisher=${publisher:="/usr/bin/mosquitto_pub"}
 broker=${broker:="127.0.0.1:1883"}
-topic="${topic:=$(hostname)}"
-lwt_topic="${lwt_topic:="LWT"}"
-lwt_connect="${lwt_connect:="online"}"
-lwt_disconnect="${lwt_disconnect:="offline"}"
-AlertBusTopic="ohab/security/AlertBus"
-EventBusTopic="ohab/security/EventBus"
+topic=${topic:="$(hostname)"}
+publish_pi=${publish_pi:="5m"}
 
-#defaults motion
-motion_conf=${motion_conf:="/etc/motioneye/motion.conf"}
-motion=${motion:="127.0.0.1:7999"}
+#defaults poll { [#Y] [#Q] [#M] [#d] [#h] [#m] [#s] }
+# To disable a polling function just comment/unset the poll interval
+cpu_temp_pi=${cpu_temp_pi:="30s"}
+cpu_load_pi=${cpu_load_pi:="30s"}
+mem_use_pi=${cpu_load_pi:="30s"}
+swap_use_pi=${swap_use_pi:="30s"}
+proc_degraded_pi=${proc_degraded_pi:="5m"}
+disk_use_pi=${disk_use_pi:="3h"}
+server_offline_pi=${server_offline_pi:="30m"}
+dir_change_pi=${dir_change_pi:="1d"}
+
+#defaults critical threshold
+cpu_temp_warn=${cpu_temp_warn:="65"}
+cpu_load_warn=${cpu_load_warn:="75"}
+mem_use_warn=${mem_use_warn:="75"}
+swap_use_warn=${swap_use_warn:="65"}
+disk_use_warn=${disk_use_warn:="75"}
+
+#poll user functions
+#wanip_provider=              #default: "https://api.ipify.org"
+#wanip_topic=                 #default: "$topic/wan"
+#wanip_pi=1m                  #comment to disable
+#rut955_pi=1m                 #comment to disable
+#bind_root_pi=1M              #comment to disable
 #-- end defaults ---------------------------------------------------------------
 
 #set roots
 broker_ip="${broker%:*}";broker_port="${broker/"$broker_ip"/}"; broker_port="${broker_port/:/}"
-motion_ip="${motion%:*}";motion_port="${motion/"$motion_ip"/}"; motion_port="${motion_port/:/}"
-http_cmd="curl -s http://$motion_ip:$motion_port"
-mqtt_cmd="$publisher -h $broker_ip -p $broker_port -t $topic"
+proc_list="$(dirname $conf_ufi)/proc.list"
+dir_list="$(dirname $conf_ufi)/dir.list"
+serv_list="$(dirname $conf_ufi)/serv.list"
 
 #check root
-[[ $EUID -ne 0 ]] && { echo "[ERR] You must be root to run this."; exit 1; }
+[[ $(id -u) -ne 0 ]] && { "echo [ERR] You must be root to run this."; exit 1; }
 
 case $1 in
-'start') start; set_motion_events;;
+'monitor')
+  RUNAS_DAEMON=0
+  case $2 in
+  'temp') monitor_gen "cpu_temp";;
+  'mem') monitor_gen "mem_use";;
+  'swp') monitor_gen "swap_use";;
+  'cpu') monitor_gen "cpu_load";;
+  'dsk') monitor_gen "disk_use";;
+  'prc') monitor_gen "proc_degraded";;
+  'srv') monitor_gen "server_offline";;
+  *) exit 0
+  esac;;
+'start') start;;
 'stop') stop;;
-'restart') stop;sleep 2;start;;
-'status') status "$2";;
+'restart') stop; sleep5; start;;
+'status') status $2;;
 'install') setup;;
-'debug_on') $mqtt_cmd/daemon/set/rt/debug -m "1";;
-'debug_off') $mqtt_cmd/daemon/set/rt/debug -m "0";;  
-'camera_ptz') camera_action "$1" "control" "$2" "$3";;
-'on_motion_detected') on_motion_detected "$2";;
-'on_camera_lost') on_camera_lost "$2";;
-'on_camera_found') on_camera_found "$2";;
-#'on_movie_start') :;; #on_event 'on_movie_start' "$2";;
-#'on_movie_end') :;; #on_event 'on_movie_end' "$2";;
 *) showuse
 esac
+exit 0
