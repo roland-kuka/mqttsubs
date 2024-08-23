@@ -447,11 +447,10 @@ $(sed -n 12,35p $0)
 EOF
   echo "List of motion/daemon parameters that may be changed by mqttsubs." > $conf_path/whitelist
   echo "[OK] Default '$service.conf' created in $conf_path."
-
 }
 
 function setup() { #############################################################
-[[ $EUID -ne 0 ]] && { echo "[FAIL] You are not root!. Only root can install this program."; exit 1; }
+  [[ $EUID -ne 0 ]] && { echo "[FAIL] You are not root!. Only root can install this program."; exit 1; }
   install_packages || { echo "[FAIL] [$?] Could not install required packages."; exit 1; }
   install_program || { echo "[FAIL] [$?] Could not install ${basename $0}."; exit 1; }
   install_config || { echo "[FAIL] [$?] Could not install default config file."; exit 1; }
@@ -490,6 +489,8 @@ function start() { #############################################################
 #start daemon; save pid to $run_path/$service.pid
 #check running, prep, mosquitto_sub &, loop, started
 local pid f fifo sr
+
+[[ $EUID -ne 0 ]] && { echo "[FAIL] You are not root!. Only root start $service."; exit 1; }
 
 #check if already running
   pid=$(cat $run_path/$service.pid 2>/dev/null)
@@ -691,9 +692,6 @@ case $2 in
 '--json'):;; #used in status action
 esac
 
-#check root
-[[ $EUID -ne 0 ]] && { echo "[ERR] You must be root to run this."; exit 1; }
-
 case $1 in
 '-?'|'-h'|'--help') showhelp;; 
 'start') start; set_motion_events;;
@@ -709,3 +707,5 @@ case $1 in
 #'on_movie_end') :;; #on_event 'on_movie_end' "$2";;
 *) showuse
 esac
+
+
