@@ -32,6 +32,7 @@ broker="192.168.1.252:1883" # You need at least a broker ip address.
 #motion_conf="/etc/motioneye/motion.conf"
 motion_conf="$(dirname $(readlink -f "$0"))/motion.conf"
 #motion"127.0.0.1:7999"
+motion="192.168.1.129:7999"
 
 #:L36 #ADJUST CODE IF THIS LINE CHANGES #>>> create pubstats.conf...$(sed -n 12,35p $0)...
 
@@ -71,9 +72,9 @@ local s d
 } 
 function send_to_log () {
 #topic :: severity :: message
-local logf="$log_path/$service.log" dat="$(date "+%Y-%m-%d %H:%M:%S")" 
+local log_ufi="$log_path/$service.log" dat="$(date "+%Y-%m-%d %H:%M:%S")" 
   msg="[$dat] [$1] [${2^^}] $3"
-  echo $msg #>> "$logf"; return 0
+  echo $msg #>> "$log_ufi"; return 0
 }
 
 ################################################################################
@@ -89,21 +90,21 @@ local s sr ary=("on_motion_detected" "on_camera_found" "on_camera_lost" )
   [[ -z $(cat $motion_conf 2>/dev/null | grep "webcontrol_parms.*3") ]] && return 0
 #loop ary and set events for current session
   for evt in ${ary[@]};do
-    s=$(jq -rn --arg x "$(realpath $0) $evt %t" '$x|@uri')
+    s=$(jq -rn --arg x "$ME $evt %t" '$x|@uri')
     cmd="$http_cmd/0/config/set?$evt=$s"
     [[ $debug -ne 0 ]]  && send_to_log "set_motion_events" "debug" "cmd: '$cmd'"
     [[ $debug -eq 0 ]] && sr=$($cmd)
   done
 #apply/write to motion config to make permanent
 #  sr=$($http_cmd/0/config/write)
-#  [[ $? -eq 0 ]] && { kill -s 1 $(cat /tmp/motion.pid); } #SIGHUP to reload motion config files
+#  [[ $? -eq 0 ]] && { kill -s SIGHUP $(cat /tmp/motion.pid); } #SIGHUP to reload motion config files
   return 0
 }
 
 function on_motion_detected(){ #################################################
 #id :: 
 #actions to perform on mqtt bus when motion is detected by a camara
-local cfgf deadtime priority msg
+local tmpf cfgf deadtime priority msg mqtt_cmd0
   [[ -z $1 ]] && { echo "[ERR] Please provide a camera id."; return 1; }
 #temporary file to allow for DeadTime, return 0 if exists
   tmpf="$run_path/.on_motion_detected.$1"
@@ -116,9 +117,9 @@ local cfgf deadtime priority msg
 #publish to camera specific topic
   $mqtt_cmd/camera/$1/motion/state -m "1";
 #publish to general/alert/event topic
-  mqtt_cmd0=${mqtt_pub%' -t'*};msg="$(hostname)::Camera-$1::AlertSent=$Priority"
-  [[ -n $AlertBusTopic && $priority -gt 0 ]] && $mqtt_pub0 -t "$AlertBusTopic" -m "$priority"
-  [[ -n $EventBusTopic ]] && $mqtt_pub0 -t "$EventBusTopic" -m "$msg"
+  mqtt_cmd0=${mqtt_cmd%' -t'*};msg="$(hostname)::Camera-$1::AlertSent=$priority"
+  [[ -n $AlertBusTopic && $priority -gt 0 ]] && $mqtt_cmd0 -t "$AlertBusTopic" -m "$priority"
+  [[ -n $EventBusTopic ]] && $mqtt_cmd0 -t "$EventBusTopic" -m "$msg"
 #time to reset motion on mqtt bus
   ( sleep $deadtime;$mqtt_cmd/camera/$1/motion/state -m "0";rm -f $tmpf 2>/dev/null; exit 0 ) &
   return 0
@@ -161,7 +162,7 @@ local cfgf api ip ptzcmd cmd cmd1 cmd val sr
 cfgf="$(dirname $motion_conf 2>/dev/null)/camera-${1///}.conf"
 api=$(getconfig "&cam_api" "$cfgf" " ") || return 1
 ip=$(getconfig "netcam_url" "$cfgf" " ") || return 1
-[[ $debug -eq 0 ]] && send_to_log "run_camapi" "debug" "[$1:$2:$3] api=$api@$ip."
+[[ $debug -eq 0 ]] && send_to_log "run_camapi" "debug" "api=$api@$ip."
 
 case $api in 
 'foscam1') #api for a foscam up v1.2 e.g. ipcam01
@@ -183,7 +184,7 @@ case $api in
   esac
   [[ ${cmd: -1} =~ '=' ]] && return 1 #no valid command
   cmd="curl \"${ptzcmd/'<cmd>'/"$cmd"}\"" 
-  [[ $debug -ne 0 ]] && { send_to_log "run_camapi" "debug" "[$1:$2:$3] $api:cmd: '$cmd'"; return 0; }
+  [[ $debug -ne 0 ]] && { send_to_log "run_camapi" "debug" "exec: $cmd"; return 0; }
   sr=$(eval $cmd); [[ ${sr#'='*} =~ "\"ok\"" ]] && return 0 || return 1
 ;;
 'foscam2') return 1;;
@@ -197,7 +198,7 @@ esac
 function camera_actions () { ###################################################
 #/id :/: act :/: key1 :#: payload
 #<hostname>/camera/<id>/ptz/<key> <value> >> ../<id>/ptz/<key>/state <value> 
-local ptzapi cmd cmd1 cmd val; unset ptz_cmd cmd cmd1 cmd2 val
+[[ $debug -ne 0 ]] && send_to_log "motion_actions" "debug" "[\$1::\$2::\$3::\$4] >> $1::$2::$3::$4"
 [[ ${#@} -ne 4 ]] && return 1
 [[ "${1///}" -eq 0 ]] && return 1 #camid must be specified and -ne 0
 case $2 in
@@ -209,165 +210,142 @@ case $2 in
   esac
 ;;
 'detection'|'snapshot'|'get'|'set') motion_actions $1 $2 $3 $4;;
-*) send_to_log "camera_actions" "debug" "[$1:$2:$3:$4] '$2' has no case in \$act."; return 0
+*) send_to_log "camera_actions" "debug" "'$2' has no case in \$act."; return 0
 ;;
 esac
 }
 
 function motion_actions () { ###################################################
 #/id :/: act :/: key1 :#: payload
-#<hostname>/motion/<id>/detection ON|OFF >> ../<id>/detection/state ON|OFF 
-#<hostname>/motion/<id>/snapshot ON >> ../<id>/snapshot/state OFF
+#<hostname>/motion/<id>/action/detection|snapshot|makemovie|restart ON|OFF >> ../<id>/action/<key>/state <value>
 #<hostname>/motion/<id>/get/config <key> >> ../<id>/config/<key>/state <value>
 #<hostname>/motion/<id>/get/run <key> >> ../<id>/run/<key>/state <value>
-#<hostname>/motion/<id>/set/<key> <value> >> ../<id>/config/<key>/state <value>
+#<hostname>/motion/<id>/set/<key> <value> >> ../<id>/config+run/<key>/state <value>
 local cfgf cmd sr s
 [[ $debug -ne 0 ]] && send_to_log "motion_actions" "debug" "[\$1::\$2::\$3::\$4] >> $1::$2::$3::$4"
-[[ ${#@} -ne 4 ]] && return 1
+[[ ${#@} -ne 4 || -z $1 ]] && return 1 #must have a camera id (/0.../n)
 [[ "${1///}" -ne 0 ]] && cfgf="camera-${1///}.conf"
 cfgf="$(dirname $motion_conf)/${cfgf:="motion.conf"}"
-case $2 in 
-'detection') #payload=command
-  case $4 in
-  "ON"|1 ) cmd="$http_cmd""$1/detection/start";;
-  "OFF"|0 ) cmd="$http_cmd""$1/detection/pause";;
-  *) return 1
-  esac
-  [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "$cmd"; return 0; }
-  [[ -n $cmd ]] && $cmd
-  $mqtt_cmd/motion""$1/$2/state -m ${$4^^} 
-;;
-'snapshot'|'makemovie') #payload=command
-  case $4 in
-  "ON"|1) cmd="$http_cmd""$1/action/$2";;
-  *) : #do nothing
-  esac 
-  [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "$cmd"; return 0; }
-  [[ -n $cmd ]] && $cmd
-  $mqtt_cmd/motion""$1/$2/state -m "$([[ $4 =~ ON ]] && echo "OFF" || echo "0")" #always send OFF||0 to reset
-;; 
-'restart') #restart motion >> read config files!!!
-  [[ -z $4 ]] && return 0; cmd=$http_cmd/0/action/restart;
-  [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "$cmd"; return 0; }
-  sr=$(eval "$cmd")
-  $mqtt_cmd/motion""$1/$2/state -m "$([[ $4 =~ ON ]] && echo "OFF" || echo "0")" #always send OFF||0 to reset
-;;
-'get') #key1=config|run payload=<param>
-  case $3 in
-  'config') #payload=<config key>
-    cmd="getconfig \"$4\" \"$cfgf\" ' '"
-    [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "$cmd"; return 0; }
-    [[ ! -f $cfgf ]] && return 1 #return if config file does not exist
-    sr=$(eval $cmd) || return 1
-    [[ -n $sr ]] && $mqtt_cmd/motion""$1/config/$4/state -m $sr
-  ;;
-  'run') #payload=<runtime param>
-    case $4 in #payload
-    'detection') #special case detection
-      cmd="$http_cmd""$1/detection/status";
-      [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "$cmd"; return 0; }
-      sr=$($cmd) || return 1 #execute
-      case $(echo ${sr#*'status'} | tr -d '[:blank:]') in
-        'ACTIVE') sr="ON";;'PAUSE') sr="OFF"
-      esac;;
-    *) #any motion parameter
-      cmd="$http_cmd""$1/config/get?query=$4"
-      [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "$cmd"; return 0; }
-      sr=$($cmd | grep -i "$4") || return 1 #execute
-      [[ ! -z $sr && $? -eq 0 ]] && { sr=${sr#*'='};sr=${sr%'Done'*};sr=$(echo $sr | tr -d '[:blank:]'); }   
+
+case $2 in
+'action')
+  case $3 in 
+  'detection') #switch ON|OFF >> state
+    case $4 in
+    'ON'|1 ) cmd="$http_cmd""$1/detection/start";;
+    'OFF'|0 ) cmd="$http_cmd""$1/detection/pause";;
+    *) return 0
     esac
-    [[ -n $sr ]] && $mqtt_cmd/motion""$1/run/$4/state -m $sr
+    [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "exec: $cmd"; return 0; }
+    sr=$(eval "$cmd") || return 1; sr=${$4^^} 
+  ;;
+  'snapshot'|'makemovie') #toggle ON >> OFF
+    case $4 in
+    'ON'|1) cmd="$http_cmd""$1/action/$3";;
+    *) return 0
+    esac 
+    [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "exec: $cmd"; return 0; }
+    sr=$(eval "$cmd") || return 1; sr="$([[ $4 =~ ON ]] && echo "OFF" || echo "0")"
+  ;;
+  'restart') #payload=YES >> OK
+    case $4 in
+    'YES') cmd=$http_cmd/0/action/restart;;
+    *) return 0
+    esac
+    [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "exec: $cmd"; return 0; }
+    sr=$(eval "$cmd") || return 1; sr="OK"
   esac
+  $mqtt_cmd/motion""$1/$3/state -m "${sr:="#err#"}"
 ;;
 
-'set') #key1=<param> payload=<new value>, $3 must be in whitelist
+'get') #key1=config|run payload=<param> >> <param value>
+  case $4 in #payload
+  'detection') #special case detection
+    cmd="$http_cmd""$1/detection/status";
+    [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "exec: $cmd"; return 0; }
+    sr=$(eval $cmd)
+    case $(echo ${sr#*'status'} | tr -d '[:blank:]') in
+      'ACTIVE') sr="ON";;'PAUSE') sr="OFF"
+    esac
+  ;;
+  *) #any motion parameter
+    cmd="$http_cmd""$1/config/get?query=$4"
+    [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "exec: $cmd"; return 0; }
+    sr=$($cmd | grep -i "$4")
+    [[ -n $sr && $? -eq 0 ]] && { sr=${sr#*'='};sr=${sr%'Done'*};sr=$(echo $sr | tr -d '[:blank:]'); }   
+  esac
+  $mqtt_cmd/motion""$1/get/$4/state -m "${sr:="#err#"}"
+;;
+
+'set') #key1=<param>, payload=<new value>, <param> must be in whitelist >> <new value>
 #get list of all motion parameters
 #s=$(curl -s 192.168.1.129:7999/1/config/list);s=${s// /}
 #s=$(grep "movie_quality" <<<"$s");echo $?;echo $s
 #check prerequistes to set motion parameters
   [[ -n $(cat $motion_conf 2>/dev/null | grep "webcontrol_parms.*3") ]] && sr=1
   [[ -f "$whtl_ufi" && $sr -eq 1 ]] || unset sr
-  [[ -z $sr ]] && { $mqtt_cmd/motion/set/config/state -m "#disabled#";return 0; }
+  [[ -z $sr ]] && { $mqtt_cmd/motion/set/state -m "#disabled#";return 0; }
 #check if parameter is included in $whtl_ufi
   sr=$(cat "$whtl_ufi" 2>/dev/null | grep "$3")
-  [[ -z $sr ]] && { $mqtt_cmd/motion""$1/config/$3/state -m "#blocked#"; return 0; } 
+  [[ -z $sr ]] && { $mqtt_cmd/motion""$1/set/$3/state -m "#blocked#"; return 0; }
 #try to set motion runtime parameter; exclude parameters starting with '@' or '&' 
   if [[ ${3:0:1} =~ [^\&@] ]]; then 
     s=${4//'%'/'%25'};s=${s//' '/'%20'} #url encode s=$(jq -rn --arg x $4 '$x|@uri')
     cmd="$http_cmd""$1/config/set?$3=$s" 
-    [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "$cmd"; return 0; }
-    sr=$($cmd) || { $mqtt_cmd/motion""$1/run/$3/state -m "#err#"; return 1; }
-    $mqtt_cmd/motion""$1/run/$3/state -m "$4"
+    [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "exec: $cmd"; return 0; }
+    sr=$($cmd) && sr="$4" || sr="#err#" #exec
   fi
 #if we get here, also set the parameter in the config file, this will also set [\&@] 
   cmd="setconfig \"$3\" \"$4\" \"$cfgf\" ' '"
-  [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "$cmd"; return 0; }
   [[ ! -f $cfgf ]] && return 1 #return if config file does not exist
-  eval $cmd || return 1 #execute
-  $mqtt_cmd/motion""$1/config/$3/state -m "$4"
+  eval $cmd && sr="$4" || sr="#err#" #exec
+  $mqtt_cmd/motion""$1/get/$3/state -m "$sr"
 ;;
-*) send_to_log "motion_actions" "debug" "[$1:$2:$3:$4] '$2' has no case in \$act."; return 0
+*) send_to_log "motion_actions" "debug" "'$2' has no case in \$act."; return 0
 esac
 }
 
 function daemon_actions () { ###################################################
 #act :/: key1 :/: key2 :#: payload
-#<hostname>/daemon/control <stop|restart> >> ../daemon/run/<param> OK 
-#<hostname>/daemon/get/config <var> >> ../daemon/config/<param>/state  
-#<hostname>/daemon/get/run <ssid|wifi|status|debug> >> ../daemon/run/<param>/state
-#<hostname>/daemon/set/config/<key> <value> >> ../daemon/config/<key>/state <value> 
-#<hostname>/daemon/set/run/<key> <value> >> ../daemon/run/<key>/state <value> 
+#<hostname>/daemon/control <stop|restart|reload|debug> >> ../daemon/control/<param>/state OK|#err# 
+#<hostname>/daemon/get/ <var> >> ../daemon/get/<var>/state  
+#<hostname>/daemon/set/<var> <new value> >> ../daemon/get/<var>/state <new value> 
 local sr cmd pid
-[[ $debug -ne 0 ]] && send_to_log "daemon_actions" "debug" "[\$1::\$2::\$3::\$4] >> $1::$2::$3::$4"
-[[ ${#@} -ne 4 ]] && return 1
+[[ $debug -ne 0 ]] && send_to_log "daemon_actions" "debug" "[\$1::\$2::\$3] >> $1::$2::$3"
+[[ ${#@} -ne 3 ]] && return 1
 case $1 in
 "control") #payload=action 
-  case $4 in
-    'stop') flag_exit="stop";;
-    'restart') flag_exit="restart";;
-    'reload') pid=$(cat $run_path/$service.pid 2>/dev/null); kill -s SIGHUP $pid 2>/dev/null;;
-    'debug') debug="$val"
+  case $3 in
+    'stop') cmd="flag_exit=stop";;
+    'restart') cmd="flag_exit=restart";;
+    'reload') pid=$(cat "$run_path/$service-loop.pid" 2>/dev/null) \
+              && cmd="kill -s SIGHUP $pid 2>/dev/null" \
+              || cmd="#err#"; sr="#err#";;
+    'debug') cmd="debug=$val";sr="$val";;
+    *) cmd="#err#"
   esac
-  [[ $debug -ne 0 ]] && { send_to_log "daemon_actions" "debug" "$cmd"; return 0; }
-  eval "$cmd"; $mqtt_cmd/daemon/control/$4/return -m "$?"
-  return 0
+  [[ $debug -ne 0 ]] && { send_to_log "daemon_actions" "debug" "exec: $cmd"; return 0; }
+  eval "$cmd" && sr="${sr:="OK"}" || sr="#err#"
+  $mqtt_cmd/daemon/control/$3/state -m "${sr:="#err#"}"
 ;;
-'get')
-  case $2 in
-  'config') #payload=<config key>
-    cmd="getconfig \"$4\" \"$conf_ufi\" \"=\""
-    [[ $debug -ne 0 ]]  && { send_to_log "daemon_actions" "debug" "$cmd"; return 0; }
-    [[ ! -f $conf_ufi ]] && return 1
-    sr=$(eval $cmd) || return 1 #execute
-    $mqtt_cmd/daemon/config/$4/state -m "${sr:=null}"
-  ;;
-  'run') #payload=<runtime var>
-    case $4 in
-      "ssid"|"wifi") sr=$(iwgetid);sr="${sr#*'ESSID:'}";;
-      "status") sr=$(status --json);;
-    *) [[ "$4" =~ ^[a-zA-Z][a-zA-Z0-9_]*$ ]] && [[ -n ${!4} ]] && sr="${!4}" || sr="n/a"
-    esac
-    [[ -z $sr ]] && sr="#n/a#"
-    $mqtt_cmd/daemon/run/$4/state -m "$sr"
+'get') #payload=<param> >> <param value>
+  case $3 in
+  "ssid"|"wifi") sr=$(iwgetid);sr="${sr#*'ESSID:'}";;
+  "status") sr=$(status --json);;
+  *) [[ "$3" =~ ^[a-zA-Z][a-zA-Z0-9_]*$ ]] && [[ -n ${!3} ]] && sr="${!3}"
   esac
+  $mqtt_cmd/daemon/get/$3/state -m "${sr:="#err#"}"
 ;;
-'set')
-  case $2 in
-  'config') #key2=<config key>; payload=<new value>
-    cmd="setconfig \"$3\" \"$4\" \"$conf_ufi\" \"=\"" 
-    [[ $debug -ne 0 ]] && { send_to_log "daemon_actions" "debug" "$cmd"; return 0; }
-    eval "$cmd" || return 1 #execute
-    $mqtt_cmd/daemon/config/$3/state -m "$4"
-    #TODO: deamon reload
-  ;;
-  'run') #key2=<runtime var>; payload=<new value>
-    [[ "$3" =~ ^[a-zA-Z][a-zA-Z0-9_]*$ ]] && cmd="$3=\"$4\"" || return 1
-    [[ $debug -ne 0 ]]  && { send_to_log "daemon_actions" "debug" "$cmd"; return 0; }
-    eval "$cmd" 2>/dev/null || return 1 #exec
-    $mqtt_cmd/daemon/run/$3/state -m "\"${!4}\""; return 0
-  esac
+'set') #key1=<param>, payload=<new value>, <param> must be in whitelist >> <new value>
+  #check if parameter is included in $whtl_daemon
+  sr=$(echo "$whtl_daemon" 2>/dev/null | grep "$2")
+  [[ -z $sr ]] && { $mqtt_cmd/daemon/get/$2/state -m "#blocked#"; return 0; } || unset sr
+  [[ "$2" =~ ^[a-zA-Z][a-zA-Z0-9_]*$ ]] && cmd="$2=\"$3\"" || unset cmd
+  [[ $debug -ne 0 ]]  && { send_to_log "daemon_actions" "debug" "exec: ${cmd:"#err#"}"; return 0; }
+  [[ -n $cmd ]] && eval "$cmd" 2>/dev/null && sr="${!3}"
+  $mqtt_cmd/daemon/get/$2/state -m "${sr:="#err"}"
 ;;
-*) send_to_log "daemon_actions" "debug" "[$1:$2:$3:$4] '$1' has no case in \$act."; return 0
+*) send_to_log "daemon_actions" "debug" "'$1' has no case in \$act."; return 0
 esac
 }
 
@@ -377,7 +355,7 @@ function os_actions () { ###################################################
 [[ ${#@} -ne 2 ]] && return 1
 case $1 in
 'demo') cmd="demo $2"; sr="result of pseudo just for demo";;
-'ls') return 0; cmd="ls $2"; sr="$(echo $(eval "$cmd"))";;
+'ls') return 0; cmd="ls $2"; sr="$(eval "$cmd")";;
 *) send_to_log "os_actions" "debug" "'$1' has no case in \$act."; return 0
 esac
 json="{\"$topic\":{\"exec\":{\"cmd\":\"$1\",\"args\":\"$2\",\"res\":\""$sr"\"}}}"
@@ -391,7 +369,7 @@ $mqtt_cmd/oscmd/json -m "$json"
 function install_packages () { #################################################
 local pkg miss err_pkg uinp
 #get missing packages
-  for pkg in $packages; do
+  for pkg in $inst_pkgs; do
     dpkg -s "$pkg" >/dev/null 2>&1 && continue || miss+="$pkg "
   done
 #user interface
@@ -399,7 +377,7 @@ local pkg miss err_pkg uinp
     read -t 10 -n 3 -p "# Missing packages '$miss'.Enter YES to install now." uinp
     case $uinp in
     'YES') echo -e "\n# Install missing packages...";;
-    *) echo -e "[ERR] Missing packages not installed, please install $packages manually."; return 10;;
+    *) echo -e "[ERR] Missing packages not installed, please install $inst_pkgs manually."; return 10;;
     esac
   else
     echo "[OK] Required packages are already installed."; return 0
@@ -414,7 +392,7 @@ local pkg miss err_pkg uinp
 
 function install_program () { ##################################################
 local dst
-  dst="$prog_path/$(basename $0)"
+  dst="$inst_path/$(basename $0)"
   echo "# Copy '$(basename $0)' to $dst."
   cp $0 $dst && chown root:root $dst && chmod 751 $dst && return 0
   return 21
@@ -430,7 +408,7 @@ After=network.target
 
 [Service]
 Type=forking
-ExecStart=/bin/bash -c "$prog_path/${basename $0} start"
+ExecStart=/bin/bash -c "$inst_path/${basename $0} start"
 RemainAfterExit=yes
 
 [Install]
@@ -554,20 +532,20 @@ while read msg <$fifo; do
   val="${msg#*' '}"                                           #get payload >> val
 #...start interpret/filter/actions here
   [[ ${tmp##*"/"} =~ state ]] && continue                     #ignore topics ending with /state
-  [[ $debug -ne 0 ]] && send_to_log "start:loop" "debug" "$msg >> [cat|id|act|key1|key2#val] $cat|${id:=n/a}|$act|$key1|$key2#$val"
+  [[ $debug -ne 0 ]] && send_to_log "start:loop" "debug" "$msg >> [cat|id|act|key1|key2#val] $cat|$id|$act|$key1|$key2#$val"
   [[ $debug -eq 1 ]] && continue
   case $cat in
-  'camera') camera_actions $id $act $key1 "$val";;
-  'motion') motion_actions $id $act $key1 "$val";;
-  'daemon') daemon_actions $act $key1 $key2 "$val";;
-  'oscmd') os_actions $act "$val";;
+  'camera') camera_actions "$id" "$act" "$key1" "$val";;
+  'motion') motion_actions "$id" "$act" "$key1" "$val";;
+  'daemon') daemon_actions "$act" "$key1" "$val";;
+  'oscmd') os_actions "$act" "$val";;
   *) send_to_log "start:loop" "debug" "'$cat' has no case in \$cat."
   esac
 #...end interpret/filter/actions
   [[ -n $flag_exit ]] && break                                #stop or restart from mqtt
 done #end daemon loop; trapped (this happens when mosquitto_sub pid is killed)
-[[ -n $flag_exit ]] && $0 $flag_exit                          #restart daemon from mqtt
-) #& # end subshell daemon loop
+[[ -n $flag_exit ]] && ( sleep 2;$ME $flag_exit ) &  #restart daemon from mqtt
+) #& echo $! > "$run_path/$service-loop.pid" # end subshell daemon loop
 
 ### started daemon ####################
   [[ -n $lwt_topic ]] && $mqtt_cmd/$lwt_topic -m "${lwt_connect}"
@@ -627,10 +605,10 @@ local pid
 ################################################################################
 
 function showuse() { ###########################################################
-cat <<EOF
-$(sed -n 628,640p $0) 
+  cat <<EOF
+$(sed -n 638,644p $0) 
 EOF
-exit 0
+  exit 0
 }
 
 function showhelp () { #########################################################
@@ -668,8 +646,8 @@ exit 0
 ################################################################################
 #program static defs do NOT change!
 ME=$(dirname $(readlink -f "$0"))
-prog_path="/usr/sbin" #used during setup to copy this script
-packages="bc motion mosquitto-clients"
+inst_path="/usr/sbin" #used during setup to copy this script
+inst_pkgs="bc motion mosquitto-clients"
 service="${service:="mqttsubs"}"
 run_path="${run_path:="/var/run/$service"}"
 log_path="${log_path:="/var/log/$service"}"
@@ -678,6 +656,7 @@ conf_ufi="/etc/$service/$service.conf" #default when installed
 [[ ! -f $conf_ufi ]] && conf_ufi="$ME/$service.conf" #fallback
 [[ -f $conf_ufi ]] && source "$conf_ufi"
 whtl_ufi="$(dirname $conf_ufi)/whitelist"
+whtl_daemon="debug"
 
 #-- defaults, can be part of a config file -------------------------------------
 #defaults daemon
@@ -695,7 +674,8 @@ AlertBusTopic="ohab/security/AlertBus"
 EventBusTopic="ohab/security/EventBus"
 
 #defaults motion
-motion_conf=${motion_conf:="/etc/motioneye/motion.conf"}
+motion_conf=${motion_conf:="/etc/motioneye/motion.conf"}  #default for motioneye
+[[ ! -f $motion_conf ]] && motion_conf="$ME/motion.conf"  #fallback
 motion=${motion:="127.0.0.1:7999"}
 #-- end defaults ---------------------------------------------------------------
 
@@ -708,6 +688,7 @@ mqtt_cmd="$publisher -h $broker_ip -p $broker_port -t $topic"
 #get options
 case $2 in
 '--debug') debug=${3:=1};;
+'--json'):;; #used in status action
 esac
 
 #check root
