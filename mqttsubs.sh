@@ -14,7 +14,6 @@
 
 #daemon config
 #debug=0
-debug=2
 
 #mosquitto config
 #subscriber="/usr/bin/mosquitto_sub"
@@ -30,7 +29,6 @@ broker="192.168.1.252:1883" # You need at least a broker ip address.
 
 #motion config
 #motion_conf="/etc/motioneye/motion.conf"
-motion_conf="$(dirname $(readlink -f "$0"))/motion.conf"
 #motion"127.0.0.1:7999"
 motion="192.168.1.129:7999"
 
@@ -205,8 +203,8 @@ case $2 in
 'control') 
   run_camapi "$1" "$3" "$4" || return 1
   case $3 in #depending on sbj return ../act/sbj/state
-  "ir") $mqtt_cmd/camera""$1/$2/$3/state -m $4;;
-  "led") $mqtt_cmd/camera""$1/$2/$3/state -m $4;;
+  "ir") $mqtt_cmd/camera""$1/control/$3/state -m $4;;
+  "led") $mqtt_cmd/camera""$1/control/$3/state -m $4;;
   esac
 ;;
 'detection'|'snapshot'|'get'|'set') motion_actions $1 $2 $3 $4;;
@@ -218,8 +216,7 @@ esac
 function motion_actions () { ###################################################
 #/id :/: act :/: key1 :#: payload
 #<hostname>/motion/<id>/action/detection|snapshot|makemovie|restart ON|OFF >> ../<id>/action/<key>/state <value>
-#<hostname>/motion/<id>/get/config <key> >> ../<id>/config/<key>/state <value>
-#<hostname>/motion/<id>/get/run <key> >> ../<id>/run/<key>/state <value>
+#<hostname>/motion/<id>/get/ <key> >> ../<id>/config/<key>/state <value>
 #<hostname>/motion/<id>/set/<key> <value> >> ../<id>/config+run/<key>/state <value>
 local cfgf cmd sr s
 [[ $debug -ne 0 ]] && send_to_log "motion_actions" "debug" "[\$1::\$2::\$3::\$4] >> $1::$2::$3::$4"
@@ -255,7 +252,7 @@ case $2 in
     [[ $debug -ne 0 ]] && { send_to_log "motion_actions" "debug" "exec: $cmd"; return 0; }
     sr=$(eval "$cmd") || return 1; sr="OK"
   esac
-  $mqtt_cmd/motion""$1/$3/state -m "${sr:="#err#"}"
+  $mqtt_cmd/motion""$1/action/$3/state -m "${sr:="#err#"}"
 ;;
 
 'get') #key1=config|run payload=<param> >> <param value>
@@ -646,7 +643,7 @@ exit 0
 ##### MAIN #####################################################################
 ################################################################################
 #program static defs do NOT change!
-ME=$(dirname $(readlink -f "$0"))
+ME="$(readlink -f "$0")"
 inst_path="/usr/sbin" #used during setup to copy this script
 inst_pkgs="bc motion mosquitto-clients"
 service="${service:="mqttsubs"}"
@@ -654,7 +651,7 @@ run_path="${run_path:="/var/run/$service"}"
 log_path="${log_path:="/var/log/$service"}"
 
 conf_ufi="/etc/$service/$service.conf" #default when installed
-[[ ! -f $conf_ufi ]] && conf_ufi="$ME/$service.conf" #fallback
+[[ ! -f $conf_ufi ]] && conf_ufi="$(dirname $ME)/$service.conf" #fallback
 [[ -f $conf_ufi ]] && source "$conf_ufi"
 whtl_ufi="$(dirname $conf_ufi)/whitelist"
 whtl_daemon="debug"
@@ -676,7 +673,7 @@ EventBusTopic="ohab/security/EventBus"
 
 #defaults motion
 motion_conf=${motion_conf:="/etc/motioneye/motion.conf"}  #default for motioneye
-[[ ! -f $motion_conf ]] && motion_conf="$ME/motion.conf"  #fallback
+[[ ! -f $motion_conf ]] && motion_conf="$(dirname $ME)/motion.conf"  #fallback
 motion=${motion:="127.0.0.1:7999"}
 #-- end defaults ---------------------------------------------------------------
 
